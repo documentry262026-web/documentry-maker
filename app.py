@@ -56,7 +56,9 @@ def transcribe_audio(path, size):
     full_text = " ".join([seg.text.strip() for seg in seg_list])
     return full_text
 
-# --- 100% BULLETPROOF KEYWORD EXTRACTOR ---
+# ========================================================= #
+# 100% BULLETPROOF KEYWORD EXTRACTOR WITH YOUR PROMPT
+# ========================================================= #
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
@@ -66,21 +68,20 @@ def get_groq_keywords(transcript):
 
     client = Groq(api_key=GK[0])
     
-    # 100% काम करने वाले असली Groq मॉडल्स की लिस्ट
+    # 100% Real, Working Groq Models
     models_to_try = [
-        "openai/gpt-oss-20b", # आपका पसंदीदा
-        "llama3-8b-8192",     # स्टेबल Llama 3
-        "mixtral-8x7b-32768"  # तगड़ा बैकअप
+        "openai/gpt-oss-20b",         # Extremely fast, default 8B model
+        "gemma2-9b-it",           # Great for Hindi-English tasks
+        "mixtral-8x7b-32768"      # Heavy duty fallback
     ]
 
-    prompt = (
-  You are a professional stock-footage search keyword generator for a Hindi voiceover-to-video application.
+    # Your Masterpiece Prompt!
+    prompt = f"""You are a professional stock-footage search keyword generator for a Hindi voiceover-to-video application.
 
 TASK:
 Read the Hindi sentence provided below and identify the single most visually relevant scene that represents what is happening in that sentence.
 
 OUTPUT RULES — STRICT:
-
 1. Return exactly ONE short English search query containing 2–4 words.
 2. Describe a concrete, filmable visual that could realistically be found on Pixabay.
 3. Prefer specific objects, people, actions, locations, or events mentioned or clearly implied by the sentence.
@@ -106,21 +107,18 @@ Hindi: "एक आदमी जंगल में अकेला चल रह
 Output: man walking forest
 
 Now generate the visual search query for this sentence:
-{{SCENE_TEXT}}
+{transcript}
 
-Return ONLY the query.\n\n"
-        f"Text: {transcript}"
-    )
+Return ONLY the query."""
 
     for model_name in models_to_try:
         try:
             r = client.chat.completions.create(
                 model=model_name,
                 messages=[
-                    {"role": "system", "content": "You are a keyword extractor. You must reply with EXACTLY 3 English words separated by spaces. Never reply with an empty message."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=20,
+                max_tokens=15,
                 temperature=0.1
             )
             
@@ -128,9 +126,10 @@ Return ONLY the query.\n\n"
             raw_output = raw_output.strip()
             
             if raw_output:
+                # Clean any stray punctuation the AI might still throw
                 clean_text = re.sub(r"[^\w\s]", " ", raw_output)
-                words = [w for w in clean_text.split() if len(w) > 2]
-                final_keywords = " ".join(words[:3])
+                words = [w for w in clean_text.split() if len(w) > 0]
+                final_keywords = " ".join(words[:4]) # Picking max 4 words
                 
                 if final_keywords:
                     return final_keywords
@@ -140,7 +139,7 @@ Return ONLY the query.\n\n"
         except Exception as e:
             st.warning(f"⚠️ `{model_name}` failed: {str(e)}. Switching to next model...")
 
-    raise RuntimeError("All Groq models failed to generate keywords. The API might be down.")
+    raise RuntimeError("All Groq models failed. The API might be down or key is exhausted.")
 
 def fetch_pixabay_media(query, orientation):
     if not PK:
