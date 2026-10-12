@@ -20,17 +20,15 @@ if not hasattr(PIL.Image, 'ANTIALIAS'):
 FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
 
 # --- STREAMLIT MEMORY (SESSION STATE) ---
-# Ye app ko refresh hone par video bhulne nahi dega!
 if 'video_ready' not in st.session_state:
     st.session_state.video_ready = False
-    st.session_state.video_bytes = None
+    st.session_state.video_path = None
 
 # --- GROQ API KEYS (Superfast) ---
 GROQ_KEYS = [
     "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",
     "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"
 ]
-# Tuhmare Bataye Hue Asli Groq Models (Fastest)
 GROQ_MODELS = ['openai/gpt-oss-20b', 'openai/gpt-oss-120b']
 
 # --- GEMINI BACKUP KEYS ---
@@ -186,8 +184,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
 
 # --- STREAMLIT WEB GUI ---
 st.set_page_config(page_title="AI Documentary Maker", page_icon="🎬", layout="centered")
-st.title("🎬 Pure Docu-Studio AI (Zero RAM Edition)")
-st.write("100% Crash-Proof! Powered by Groq, Gemini & Built-in FFmpeg.")
+st.title("🎬 Pure Docu-Studio AI (Final Engine)")
+st.write("100% Crash-Proof! Powered by Groq, Gemini & RAM-Optimized FFmpeg.")
 
 ratio_choice = st.radio("🎥 वीडियो का साइज़ चुनें:", ["16:9 (YouTube Standard)", "9:16 (Shorts / Reels)"], index=0)
 target_w, target_h = (1920, 1080) if "16:9" in ratio_choice else (1080, 1920)
@@ -196,7 +194,7 @@ orientation = "horizontal" if "16:9" in ratio_choice else "vertical"
 uploaded_file = st.file_uploader("यहाँ अपनी फाइल अपलोड करें (Max: 500MB)", type=["mp3", "wav", "mp4", "m4a", "aac", "mov", "avi"])
 
 if uploaded_file and st.button("🔥 Generate Documentary Video"):
-    st.session_state.video_ready = False # Reset memory for new video
+    st.session_state.video_ready = False 
     
     file_ext = uploaded_file.name.split('.')[-1]
     temp_input_file = f"temp_input.{file_ext}"
@@ -220,10 +218,10 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
             fade_filter = ",fade=t=in:st=0:d=0.5" if i > 0 else ""
             
             if vid_path:
-                cmd = f'"{FFMPEG_EXE}" -y -stream_loop -1 -i "{vid_path}" -t {duration} -vf "scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h},setsar=1{fade_filter}" -r 24 -c:v libx264 -preset superfast -an "{out_path}"'
+                cmd = f'"{FFMPEG_EXE}" -y -stream_loop -1 -i "{vid_path}" -t {duration} -vf "scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h},setsar=1{fade_filter}" -r 24 -c:v libx264 -preset ultrafast -threads 2 -an "{out_path}"'
                 subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
-                cmd = f'"{FFMPEG_EXE}" -y -f lavfi -i color=c=black:s={target_w}x{target_h}:r=24 -t {duration} -vf "setsar=1{fade_filter}" -c:v libx264 -preset superfast -an "{out_path}"'
+                cmd = f'"{FFMPEG_EXE}" -y -f lavfi -i color=c=black:s={target_w}x{target_h}:r=24 -t {duration} -vf "setsar=1{fade_filter}" -c:v libx264 -preset ultrafast -threads 2 -an "{out_path}"'
                 subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
             processed_files_list.append(out_path)
@@ -234,20 +232,24 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
             for pf in processed_files_list:
                 f.write(f"file '{pf}'\n")
         
-        status_text.text("📝 कैप्शंस (Yellow Highlight) वीडियो पर जलाए जा रहे हैं...")
+        status_text.text("📝 कैप्शंस (Yellow Highlight) वीडियो पर जलाए जा रहे हैं (RAM Bypass Active)...")
         generate_ass_subtitles(words_data, target_w, target_h)
         
         final_output = "FINAL_DOCUMENTARY.mp4"
-        cmd = f'"{FFMPEG_EXE}" -y -f concat -safe 0 -i concat_list.txt -i "{temp_input_file}" -vf "ass=captions.ass" -c:v libx264 -preset fast -c:a aac -shortest "{final_output}"'
+        
+        # --- THE MASTER RAM BYPASS COMMAND (-preset ultrafast, -threads 2) ---
+        cmd = f'"{FFMPEG_EXE}" -y -f concat -safe 0 -i concat_list.txt -i "{temp_input_file}" -vf "ass=captions.ass" -c:v libx264 -preset ultrafast -crf 28 -threads 2 -c:a aac -shortest "{final_output}"'
         subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
-        progress_bar.progress(100)
-        status_text.success("✅ वीडियो सफलतापूर्वक बन गई है!")
-        
-        # VIDEO KO MEMORY ME SAVE KARNA (Taki download dabane par refresh hoke gayab na ho)
-        with open(final_output, "rb") as file:
-            st.session_state.video_bytes = file.read()
+        if os.path.exists(final_output):
+            progress_bar.progress(100)
+            status_text.success("✅ वीडियो सफलतापूर्वक बन गई है!")
+            
+            # RAM me store nahi karenge, bas File ka raasta yaad rakhenge
+            st.session_state.video_path = final_output
             st.session_state.video_ready = True
+        else:
+            raise Exception("FFmpeg Rendering Error! Sayad captions properly render nahi hue.")
             
     except Exception as e:
         st.error(f"Error: {str(e)}")
@@ -255,17 +257,18 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
     finally:
         cleanup_temp_files()
 
-# --- DISPLAY VIDEO & DOWNLOAD BUTTON (Outside the main generation loop) ---
-if st.session_state.video_ready and st.session_state.video_bytes:
+# --- DISPLAY VIDEO & DOWNLOAD BUTTON (0% Memory Loaded) ---
+if st.session_state.video_ready and st.session_state.video_path and os.path.exists(st.session_state.video_path):
     st.markdown("### 🎬 तुम्हारी फाइनल डॉक्यूमेंट्री:")
     
-    # Ye raha naya Video Player
-    st.video(st.session_state.video_bytes)
+    # Direct Hard-Disk se play karega
+    st.video(st.session_state.video_path)
     
-    # Download Button (Ab refresh hone par gayab nahi hoga)
-    st.download_button(
-        label="⬇️ Download Final Video", 
-        data=st.session_state.video_bytes, 
-        file_name="My_Documentary.mp4", 
-        mime="video/mp4"
-    )
+    # Direct Hard-Disk se download hoga
+    with open(st.session_state.video_path, "rb") as file:
+        st.download_button(
+            label="⬇️ Download Final Video", 
+            data=file, 
+            file_name="My_Documentary.mp4", 
+            mime="video/mp4"
+        )
