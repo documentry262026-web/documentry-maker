@@ -1,395 +1,270 @@
-import os, re, shutil, subprocess, tempfile
+import os, re, json, tempfile, subprocess, traceback
 from pathlib import Path
-
-import requests
 import streamlit as st
-import imageio_ffmpeg
-from faster_whisper import WhisperModel
-from groq import Groq
-from google import genai
+import requests
 
-st.set_page_config(page_title="Voiceover to Video Studio", page_icon="🎬", layout="centered")
-st.title("🎬 Voiceover-to-Video Studio")
-st.caption("Searches separate Pixabay clips for each narration scene and burns timed captions into the MP4.")
+try:
+    from groq import Groq
+except Exception:
+    Groq = None
+try:
+    from google import genai
+except Exception:
+    genai = None
+try:
+    from faster_whisper import WhisperModel
+except Exception:
+    WhisperModel = None
+try:
+    import imageio_ffmpeg
+except Exception:
+    imageio_ffmpeg = None
 
-PIXABAY_URL = "https://pixabay.com/api/videos/"
-GROQ_DEFAULT_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]
-GEMINI_DEFAULT_MODELS = ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.5-flash"]
+st.set_page_config(page_title="AI Diagnostic Lab", page_icon="🧪")
+st.title("🧪 AI Video Generator — Tests")
 
-def secret(name, default=None):
+def setting(k, default=None):
     try:
-        value = st.secrets.get(name, default)
+        return st.secrets.get(k, os.environ.get(k, default))
     except Exception:
-        value = default
-    return os.environ.get(name, value)
+        return os.environ.get(k, default)
 
-def secret_list(name, env_name=None):
-    value = secret(name, None)
-    if value is None and env_name:
-        value = secret(env_name, None)
-    if value is None:
-        return []
-    if isinstance(value, str):
-        value = re.split(r"[,\n]+", value)
-    elif not isinstance(value, (list, tuple)):
-        value = [value]
-    return [str(x).strip() for x in value if str(x).strip()]
+def keys(v):
+    if isinstance(v, str):
+        v = [v]
+    return [str(x).strip() for x in (v or []) if str(x).strip() and "YOUR_" not in str(x) and "PASTE_NEW_" not in str(x)]
 
-def get_keys():
-    groq_keys = secret_list("GROQ_KEYS", "GROQ_API_KEYS")
-    gemini_keys = secret_list("GEMINI_KEYS", "GEMINI_API_KEYS")
-    if not groq_keys and secret("GROQ_API_KEY"):
-        groq_keys = [str(secret("GROQ_API_KEY")).strip()]
-    if not gemini_keys and secret("GEMINI_API_KEY"):
-        gemini_keys = [str(secret("GEMINI_API_KEY")).strip()]
-    pixabay_key = str(secret("PIXABAY_API_KEY", "") or "").strip()
-    return groq_keys, gemini_keys, pixabay_key
+GROQ_KEYS = keys(setting("GROQ_KEYS", []))
+GEMINI_KEYS = keys(setting("GEMINI_KEYS", []))
+PIXABAY_API_KEY = str(setting("PIXABAY_API_KEY", "") or "").strip()
+GROQ_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]
+GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.7-flash"]
+PIXABAY_API = "https://pixabay.com/api/videos/"
 
-def run_cmd(args, timeout=600):
-    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-    if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout or "Command failed")[-2500:])
-    return result
+def error(title, e):
+    st.error(title)
+    st.code(f"{type(e).__name__}: {str(e)[:1500]}")
+    st.code(traceback.format_exc()[-3000:])
 
-def get_ffmpeg():
-    exe = shutil.which("ffmpeg")
-    if exe:
-        return exe
+def ffmpeg():
+    if not imageio_ffmpeg:
+        raise RuntimeError("imageio-ffmpeg import failed")
     return imageio_ffmpeg.get_ffmpeg_exe()
 
-def check_subtitles_filter(ffmpeg):
-    result = subprocess.run([ffmpeg, "-hide_banner", "-filters"], capture_output=True, text=True)
-    output = (result.stdout or "") + (result.stderr or "")
-    if " subtitles " not in output and " ass " not in output:
-        raise RuntimeError("FFmpeg lacks the subtitles/ASS filter. Add ffmpeg and fonts-dejavu-core to packages.txt, then redeploy.")
+def run(cmd, timeout=120):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
-def make_keyword(text, groq_keys, gemini_keys):
-    prompt = (
-        "Create a concise English Pixabay stock-footage search phrase of 2 to 5 words for this narration. "
-        "Name concrete visible objects, places, or actions. Return only the phrase, no explanation or quotes.\n"
-        f"NARRATION: {text}"
-    )
-    groq_models = secret_list("GROQ_MODELS") or GROQ_DEFAULT_MODELS
-    gemini_models = secret_list("GEMINI_MODELS") or GEMINI_DEFAULT_MODELS
-    for key in groq_keys:
-        for model in groq_models:
-            try:
-                client = Groq(api_key=key)
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": "Return only a concise English stock-footage search phrase."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.2, max_tokens=30,
-                )
-                phrase = response.choices[0].message.content.strip().strip("\"'`")
-                phrase = re.sub(r"[^A-Za-z0-9 ,'-]", " ", phrase)
-                phrase = " ".join(phrase.split()[:5]).strip(" ,")
-                if phrase:
-                    return phrase
-            except Exception:
-                pass
-    for key in gemini_keys:
-        for model in gemini_models:
-            try:
-                response = genai.Client(api_key=key).models.generate_content(
-                    model=model, contents=prompt
-                )
-                phrase = (response.text or "").strip().strip("\"'`")
-                phrase = re.sub(r"[^A-Za-z0-9 ,'-]", " ", phrase)
-                phrase = " ".join(phrase.split()[:5]).strip(" ,")
-                if phrase:
-                    return phrase
-            except Exception:
-                pass
-    raise RuntimeError("All Groq/Gemini attempts failed. Check rotated keys, model IDs, quotas, and network access.")
+# 1. CONFIG / LIBRARIES
+st.header("1. Configuration")
+st.write("Groq keys:", len(GROQ_KEYS), "| Gemini keys:", len(GEMINI_KEYS),
+         "| Pixabay key:", bool(PIXABAY_API_KEY))
+st.write("Groq SDK:", bool(Groq), "| Gemini SDK:", bool(genai),
+         "| Whisper:", bool(WhisperModel), "| FFmpeg package:", bool(imageio_ffmpeg))
+with st.expander("Secrets format"):
+    st.code('''GROQ_KEYS = ["NEW_GROQ_KEY_1", "NEW_GROQ_KEY_2"]
+GEMINI_KEYS = ["NEW_GEMINI_KEY_1", "NEW_GEMINI_KEY_2"]
+PIXABAY_API_KEY = "NEW_PIXABAY_KEY"''', language="toml")
 
-def find_pixabay_clip(keyword, key, orientation, used_ids):
-    params = {
-        "key": key, "q": keyword, "lang": "en",
-        "video_type": "film", "orientation": orientation,
-        "safesearch": "true", "order": "popular", "per_page": 15
-    }
-    response = requests.get(PIXABAY_URL, params=params, timeout=(10, 30))
-    response.raise_for_status()
-    hits = response.json().get("hits", [])
+# 2. GROQ
+st.header("2. Groq API")
+if st.button("Test Groq"):
+    results = []
+    if not Groq or not GROQ_KEYS:
+        st.error("Groq SDK missing or no keys configured")
+    else:
+        for i, key in enumerate(GROQ_KEYS, 1):
+            for model in GROQ_MODELS:
+                try:
+                    r = Groq(api_key=key).chat.completions.create(
+                        model=model,
+                        messages=[{"role":"user","content":"Reply OK"}],
+                        max_tokens=10)
+                    results.append(f"Key {i} / {model}: PASS - {r.choices[0].message.content}")
+                except Exception as e:
+                    results.append(f"Key {i} / {model}: FAIL - {type(e).__name__}: {str(e)[:250]}")
+        st.code("\n".join(results))
 
+# 3. GEMINI
+st.header("3. Gemini API")
+if st.button("Test Gemini"):
+    results = []
+    if not genai or not GEMINI_KEYS:
+        st.error("Gemini SDK missing or no keys configured")
+    else:
+        for i, key in enumerate(GEMINI_KEYS, 1):
+            for model in GEMINI_MODELS:
+                try:
+                    r = genai.Client(api_key=key).models.generate_content(
+                        model=model, contents="Reply OK")
+                    results.append(f"Key {i} / {model}: PASS - {(r.text or '')[:150]}")
+                except Exception as e:
+                    results.append(f"Key {i} / {model}: FAIL - {type(e).__name__}: {str(e)[:250]}")
+        st.code("\n".join(results))
+
+# 4. WHISPER
+st.header("4. Whisper transcription")
+audio = st.file_uploader("Upload audio/video", type=["mp3","wav","m4a","aac","mp4","mov","avi","webm","flac"])
+size = st.selectbox("Whisper model", ["tiny","base","small"])
+lang = st.selectbox("Language", ["Auto","Hindi","English"])
+if st.button("Test Whisper", disabled=audio is None):
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "input" + (Path(audio.name).suffix or ".mp3"))
+            with open(p, "wb") as f:
+                f.write(audio.getbuffer())
+            model = WhisperModel(size, device="cpu", compute_type="int8")
+            opts = {"word_timestamps": True}
+            if lang != "Auto":
+                opts["language"] = {"Hindi":"hi","English":"en"}[lang]
+            segments, info = model.transcribe(p, **opts)
+            data = [{"start":round(s.start,2),"end":round(s.end,2),"text":s.text.strip()} for s in segments]
+        st.session_state["segments"] = data
+        st.success(f"Whisper PASS | Language: {info.language} | Duration: {info.duration:.1f}s")
+        st.json(data)
+        st.download_button("Download transcript", "\n".join(x["text"] for x in data), "transcript.txt")
+    except Exception as e:
+        error("Whisper failed", e)
+
+# 5. PIXABAY
+st.header("5. Pixabay search/download")
+query = st.text_input("Visual search phrase", "city traffic")
+orientation = st.radio("Orientation", ["horizontal","vertical"], horizontal=True)
+
+def pixabay(q):
+    if not PIXABAY_API_KEY:
+        raise RuntimeError("PIXABAY_API_KEY missing in Secrets")
+    r = requests.get(PIXABAY_API, params={"key":PIXABAY_API_KEY,"q":q,
+        "video_type":"film","orientation":orientation,"safesearch":"true","per_page":5}, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"Pixabay HTTP {r.status_code}: {r.text[:400]}")
+    hits = r.json().get("hits", [])
     if not hits:
-        params.pop("orientation", None)
-        response = requests.get(PIXABAY_URL, params=params, timeout=(10, 30))
-        response.raise_for_status()
-        hits = response.json().get("hits", [])
+        raise RuntimeError("No videos found")
+    return hits
 
-    query_words = {w.lower() for w in re.findall(r"[A-Za-z]{3,}", keyword)}
-    hits.sort(
-        key=lambda h: len(
-            query_words & {
-                w.lower() for w in re.findall(r"[A-Za-z]{3,}", h.get("tags", ""))
-            }
-        ),
-        reverse=True
-    )
-
-    for allow_reuse in (False, True):
-        for hit in hits:
-            if not allow_reuse and str(hit.get("id")) in used_ids:
-                continue
-            videos = hit.get("videos") or {}
-            video = videos.get("large") or videos.get("medium") or videos.get("small")
-            if video and video.get("url"):
-                return hit, video["url"]
-    return None, None
-
-def download_clip(url, path):
-    with requests.get(url, stream=True, timeout=(10, 60)) as response:
-        response.raise_for_status()
-        with open(path, "wb") as f:
-            for chunk in response.iter_content(1024 * 1024):
-                if chunk:
-                    f.write(chunk)
-    if not os.path.exists(path) or os.path.getsize(path) < 10000:
-        raise RuntimeError("Pixabay returned an empty or invalid video download.")
-
-def transcribe(ffmpeg, input_path, workdir, model_size, language):
-    wav = os.path.join(workdir, "audio_for_whisper.wav")
-    run_cmd([
-        ffmpeg, "-y", "-i", input_path, "-vn", "-ac", "1",
-        "-ar", "16000", "-c:a", "pcm_s16le", wav
-    ])
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    lang = {"Hindi": "hi", "English": "en"}.get(language)
-    segments, info = model.transcribe(
-        wav, language=lang, word_timestamps=True, vad_filter=True
-    )
-    words = []
-    for segment in segments:
-        for word in (segment.words or []):
-            text = (word.word or "").strip()
-            if text and word.end > word.start:
-                words.append({
-                    "start": float(word.start),
-                    "end": float(word.end),
-                    "text": text
-                })
-    if not words:
-        raise RuntimeError("Whisper found no speech. Check the uploaded file and audio.")
-    return words, getattr(info, "language", None)
-
-def make_scenes(words, seconds):
-    scenes, group = [], []
-    group_start = words[0]["start"]
-    for word in words:
-        if group and word["end"] - group_start >= seconds:
-            scenes.append({
-                "start": group[0]["start"],
-                "end": group[-1]["end"],
-                "text": " ".join(w["text"] for w in group)
-            })
-            group = []
-            group_start = word["start"]
-        group.append(word)
-        if word["end"] - group_start >= seconds and re.search(r"[.!?।]$", word["text"]):
-            scenes.append({
-                "start": group[0]["start"],
-                "end": group[-1]["end"],
-                "text": " ".join(w["text"] for w in group)
-            })
-            group = []
-            group_start = word["end"]
-    if group:
-        scenes.append({
-            "start": group[0]["start"],
-            "end": group[-1]["end"],
-            "text": " ".join(w["text"] for w in group)
-        })
-    return [s for s in scenes if s["end"] - s["start"] >= 0.25]
-
-def ass_time(value):
-    value = max(0.0, float(value))
-    return f"{int(value//3600)}:{int(value%3600//60):02d}:{int(value%60):02d}.{int(value%1*100):02d}"
-
-def write_captions(words, width, height, path, highlight=True):
-    font_size = 64 if width > height else 54
-    margin_v = 100 if width > height else 250
-    header = f"""[Script Info]
-ScriptType: v4.00+
-WrapStyle: 2
-ScaledBorderAndShadow: yes
-PlayResX: {width}
-PlayResY: {height}
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans,{font_size},&H00FFFFFF,&H0000FFFF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,{margin_v},1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
-    lines = [header]
-    for i in range(0, len(words), 5):
-        batch = words[i:i+5]
-        for highlight_index, current in enumerate(batch):
-            pieces = []
-            for j, word in enumerate(batch):
-                safe = word["text"].replace("{", r"\{").replace("}", r"\}")
-                if highlight and j == highlight_index:
-                    pieces.append(r"{\c&H0000FFFF&}" + safe + r"{\c&H00FFFFFF&}")
-                else:
-                    pieces.append(safe)
-            lines.append(
-                f"Dialogue: 0,{ass_time(current['start'])},{ass_time(current['end'])},Default,,0,0,0,,{' '.join(pieces)}\n"
-            )
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("".join(lines))
-
-def make_scene(ffmpeg, source, output, duration, width, height, fade):
-    vf = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1,fps=30"
-    if fade:
-        vf += ",fade=t=in:st=0:d=0.25"
-    run_cmd([
-        ffmpeg, "-y", "-stream_loop", "-1", "-i", source,
-        "-t", f"{duration:.3f}", "-vf", vf, "-an",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-        "-pix_fmt", "yuv420p", "-threads", "2", output
-    ], timeout=600)
-    if not os.path.exists(output) or os.path.getsize(output) < 10000:
-        raise RuntimeError("A scene failed to render.")
-
-def render_final(ffmpeg, scenes, audio, captions, output):
-    concat = os.path.join(os.path.dirname(output), "concat_list.txt")
-    with open(concat, "w", encoding="utf-8") as f:
-        for scene in scenes:
-            f.write("file '" + str(Path(scene).resolve()).replace("'", "'\\''") + "'\n")
-    cap = str(Path(captions).resolve()).replace("\\", "/").replace(":", r"\\:")
-    run_cmd([
-        ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", concat, "-i", audio,
-        "-vf", f"subtitles='{cap}'",
-        "-map", "0:v:0", "-map", "1:a:0",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
-        "-shortest", "-movflags", "+faststart", output
-    ], timeout=1800)
-    if not os.path.exists(output) or os.path.getsize(output) < 50000:
-        raise RuntimeError("Final MP4 was not created correctly.")
-
-# ---------------- UI ----------------
-ratio = st.radio(
-    "Video format", ["YouTube 16:9", "Shorts/Reels 9:16"], horizontal=True
-)
-width, height = (1920, 1080) if ratio == "YouTube 16:9" else (1080, 1920)
-orientation = "horizontal" if width > height else "vertical"
-language = st.selectbox("Voiceover language", ["Auto-detect", "Hindi", "English"])
-model_size = st.selectbox("Whisper model (CPU)", ["tiny", "base", "small"], index=1)
-scene_seconds = st.slider("Approximate visual change (seconds)", 4, 10, 6)
-highlight = st.checkbox("Highlight the currently spoken word", value=True)
-uploaded = st.file_uploader(
-    "Upload voiceover or video with audio",
-    type=["mp3", "wav", "m4a", "aac", "flac", "ogg", "mp4", "mov", "mkv", "webm"]
-)
-
-with st.expander("Streamlit Secrets configuration"):
-    st.code(
-        'GROQ_KEYS = ["ROTATED_GROQ_KEY_1", "ROTATED_GROQ_KEY_2"]\n'
-        'GEMINI_KEYS = ["ROTATED_GEMINI_KEY_1", "ROTATED_GEMINI_KEY_2"]\n'
-        'PIXABAY_API_KEY = "YOUR_PIXABAY_KEY"\n'
-        '# Optional: GROQ_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]\n'
-        '# Optional: GEMINI_MODELS = ["gemini-3.6-flash", "gemini-3.7-flash"]',
-        language="toml"
-    )
-st.info("Put rotated keys in Streamlit Cloud → Settings → Secrets. Never put real API keys in app.py or a public GitHub repository.")
-
-if st.button("🚀 Generate video", type="primary", disabled=uploaded is None):
-    groq_keys, gemini_keys, pixabay_key = get_keys()
-    if not groq_keys and not gemini_keys:
-        st.error("No Groq/Gemini keys found. Add GROQ_KEYS and/or GEMINI_KEYS to Streamlit Secrets.")
-        st.stop()
-    if not pixabay_key:
-        st.error("PIXABAY_API_KEY is missing from Streamlit Secrets.")
-        st.stop()
-
-    ffmpeg = get_ffmpeg()
+if st.button("Search Pixabay"):
     try:
-        check_subtitles_filter(ffmpeg)
+        hits = pixabay(query)
+        st.session_state["hits"] = hits
+        st.success(f"Pixabay PASS: {len(hits)} results")
+        for h in hits:
+            st.write(f"ID {h.get('id')} | {h.get('duration')}s | {h.get('tags')}")
     except Exception as e:
-        st.error(str(e))
-        st.stop()
+        error("Pixabay search failed", e)
 
-    progress = st.progress(0)
-    status = st.empty()
-    report = []
+if st.button("Download first Pixabay clip"):
     try:
-        with tempfile.TemporaryDirectory(prefix="voiceover_video_") as workdir:
-            ext = uploaded.name.rsplit(".", 1)[-1].lower()
-            input_path = os.path.join(workdir, "input_voiceover." + ext)
-            with open(input_path, "wb") as f:
-                f.write(uploaded.getbuffer())
-
-            status.info("1/4 — Transcribing audio…")
-            words, detected_language = transcribe(
-                ffmpeg, input_path, workdir, model_size, language
-            )
-            scenes = make_scenes(words, scene_seconds)
-            if not scenes:
-                raise RuntimeError("No scenes could be created from the transcription.")
-
-            # Cover pauses between scenes so the visuals do not end too early.
-            for scene_index in range(len(scenes) - 1):
-                scenes[scene_index]["end"] = max(
-                    scenes[scene_index]["end"], scenes[scene_index + 1]["start"]
-                )
-
-            report.append(
-                f"Detected language: {detected_language or 'unknown'}; "
-                f"{len(words)} words; {len(scenes)} scenes."
-            )
-            progress.progress(10)
-            scene_paths, used_ids = [], set()
-
-            for i, scene in enumerate(scenes):
-                status.info(f"2/4 — Finding footage for scene {i+1}/{len(scenes)}…")
-                keyword = make_keyword(scene["text"], groq_keys, gemini_keys)
-                hit, video_url = find_pixabay_clip(
-                    keyword, pixabay_key, orientation, used_ids
-                )
-                if not hit or not video_url:
-                    raise RuntimeError(
-                        f"No Pixabay clip found for scene {i+1}, search phrase {keyword!r}."
-                    )
-                used_ids.add(str(hit.get("id")))
-                src = os.path.join(workdir, f"source_{i:04d}.mp4")
-                out = os.path.join(workdir, f"scene_{i:04d}.mp4")
-                download_clip(video_url, src)
-                make_scene(
-                    ffmpeg, src, out, max(0.35, scene["end"] - scene["start"]),
-                    width, height, i > 0
-                )
-                scene_paths.append(out)
-                report.append(
-                    f"Scene {i+1}: {scene['start']:.1f}-{scene['end']:.1f}s | "
-                    f"Query: {keyword} | Pixabay tags: {hit.get('tags', 'n/a')}"
-                )
-                progress.progress(10 + int((i+1) / len(scenes) * 65))
-
-            status.info("3/4 — Building timed captions…")
-            captions = os.path.join(workdir, "captions.ass")
-            write_captions(words, width, height, captions, highlight)
-            progress.progress(80)
-
-            status.info("4/4 — Rendering MP4 with captions and original audio…")
-            final_path = os.path.join(workdir, "FINAL_VIDEO.mp4")
-            render_final(ffmpeg, scene_paths, input_path, captions, final_path)
-            progress.progress(100)
-            status.success("Video rendered successfully.")
-            st.video(final_path)
-            with open(final_path, "rb") as f:
-                st.download_button(
-                    "⬇️ Download final MP4", data=f.read(),
-                    file_name="voiceover_stock_video.mp4", mime="video/mp4"
-                )
-            with st.expander("Scene report — verify visual relevance"):
-                st.text("\n".join(report))
+        hits = st.session_state.get("hits") or pixabay(query)
+        v = hits[0].get("videos", {})
+        v = v.get("medium") or v.get("small") or v.get("large")
+        if not v or not v.get("url"):
+            raise RuntimeError("No video URL in search result")
+        r = requests.get(v["url"], timeout=90)
+        r.raise_for_status()
+        if len(r.content) < 1000:
+            raise RuntimeError("Video download too small")
+        st.success(f"Download PASS: {len(r.content):,} bytes")
+        st.download_button("Download sample video", r.content, "pixabay_test.mp4", "video/mp4")
     except Exception as e:
-        status.empty()
-        st.error(f"Video generation failed: {e}")
-        st.caption("The app stops on a failed scene instead of silently inserting unrelated generic footage.")
+        error("Pixabay download failed", e)
+
+# 6. FFMPEG + CAPTIONS
+st.header("6. FFmpeg and captions")
+if st.button("Test FFmpeg"):
+    try:
+        exe = ffmpeg()
+        r = run([exe, "-version"], 20)
+        if r.returncode:
+            raise RuntimeError(r.stderr[-1500:])
+        st.success("FFmpeg PASS")
+        st.code(r.stdout[:800])
+        f = run([exe, "-filters"], 30)
+        st.write("Subtitle filter available:", bool(re.search(r"\b(subtitles|ass)\b", f.stdout)))
+    except Exception as e:
+        error("FFmpeg failed", e)
+
+def make_srt(data):
+    def stamp(t):
+        ms = int(t*1000)
+        h, ms = divmod(ms, 3600000)
+        m, ms = divmod(ms, 60000)
+        s, ms = divmod(ms, 1000)
+        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+    out = []
+    for i, x in enumerate(data, 1):
+        if x["text"].strip():
+            out += [str(i), f'{stamp(x["start"])} --> {stamp(x["end"])}', x["text"], ""]
+    return "\n".join(out)
+
+if st.button("Test subtitle creation", disabled="segments" not in st.session_state):
+    try:
+        srt = make_srt(st.session_state["segments"])
+        if not srt.strip():
+            raise RuntimeError("No captions generated")
+        st.success("Caption file PASS")
+        st.download_button("Download captions.srt", srt, "captions.srt", "application/x-subrip")
+        st.text_area("Caption preview", srt, height=180)
+    except Exception as e:
+        error("Caption creation failed", e)
+
+# 7. END-TO-END VIDEO
+st.header("7. Complete video test")
+ratio = st.radio("Output", ["16:9","9:16"], horizontal=True)
+
+if st.button("Generate short test video", disabled=audio is None):
+    try:
+        exe = ffmpeg()
+        with tempfile.TemporaryDirectory() as d:
+            audio_path = os.path.join(d, "audio" + (Path(audio.name).suffix or ".mp3"))
+            with open(audio_path, "wb") as f:
+                f.write(audio.getbuffer())
+
+            st.info("Step 1: Whisper transcription")
+            model = WhisperModel(size, device="cpu", compute_type="int8")
+            opts = {"word_timestamps": False}
+            if lang != "Auto":
+                opts["language"] = {"Hindi":"hi","English":"en"}[lang]
+            segments, info = model.transcribe(audio_path, **opts)
+            data = [{"start":float(s.start),"end":float(s.end),"text":s.text.strip()} for s in segments if s.text.strip()]
+            if not data:
+                raise RuntimeError("Whisper returned no speech")
+            duration = max(x["end"] for x in data)
+
+            st.info("Step 2: Pixabay visual")
+            hits = pixabay(query)
+            v = hits[0].get("videos", {})
+            v = v.get("medium") or v.get("small") or v.get("large")
+            if not v or not v.get("url"):
+                raise RuntimeError("Pixabay has no usable video")
+            video_path = os.path.join(d, "visual.mp4")
+            r = requests.get(v["url"], timeout=90)
+            r.raise_for_status()
+            Path(video_path).write_bytes(r.content)
+
+            st.info("Step 3: Captions")
+            srt_path = os.path.join(d, "captions.srt")
+            Path(srt_path).write_text(make_srt(data), encoding="utf-8")
+
+            st.info("Step 4: FFmpeg rendering")
+            w, h = (1280,720) if ratio == "16:9" else (720,1280)
+            final_path = os.path.join(d, "final.mp4")
+            sub = srt_path.replace("\\","/").replace(":","\\:").replace("'","\\'")
+            vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,subtitles='{sub}'"
+            cmd = [exe,"-y","-stream_loop","-1","-i",video_path,"-i",audio_path,
+                   "-t",str(duration),"-vf",vf,"-c:v","libx264","-preset","ultrafast",
+                   "-crf","27","-threads","2","-c:a","aac","-shortest",
+                   "-movflags","+faststart",final_path]
+            result = run(cmd, 900)
+            if result.returncode:
+                raise RuntimeError("FFmpeg render failed:\n"+result.stderr[-4000:])
+            if not os.path.exists(final_path) or os.path.getsize(final_path) < 1000:
+                raise RuntimeError("Output video missing/empty")
+            final_bytes = Path(final_path).read_bytes()
+        st.success("End-to-end PASS")
+        st.video(final_bytes)
+        st.download_button("Download test video", final_bytes, "test_video.mp4", "video/mp4")
+    except Exception as e:
+        error("End-to-end video test failed", e)
+
+st.divider()
+st.caption("Testing only. Free APIs still have quotas and model access restrictions. Never share API keys in screenshots.")
