@@ -13,11 +13,21 @@ import PIL.Image
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
-PIXABAY_API_KEY = "57871281-bac58345c5fba7b07f0655556"
-GEMINI_API_KEY = "AQ.Ab8RN6IVQYNwTLU-r1GGLqI8Jcf-eNva9G0WfwRy6mUcegUTMQ"
-client = genai.Client(api_key=GEMINI_API_KEY)
+# Tumhari API Keys ka Array
+GEMINI_KEYS = [
+    "AQ.Ab8RN6IglBEm55inC7zLAOlN1HQ8Qr4JOCOQrbGwL-1vYpXSXQ",
+    "AQ.Ab8RN6JPeFn--zNyZFTnQJzj9M8lMwl4PfX4R1Qt3SFKoQ4D_w",
+    "AQ.Ab8RN6IVQYNwTLU-r1GGLqI8Jcf-eNva9G0WfwRy6mUcegUTMQ",
+    "AQ.Ab8RN6KCsY2r4jW9nu8C8RbAY8k9vn7SMbNwzAayQBDQj1ahUA"
+]
 
-# --- NEW: BYPASS 'av' ERROR USING DIRECT FFMPEG DECODING ---
+# Tumhare strict instructions ke hisab se models
+TARGET_MODELS = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-flash']
+
+# Pixabay API[cite: 1]
+PIXABAY_API_KEY = "57871281-bac58345c5fba7b07f0655556" 
+
+# --- FFMPEG DIRECT AUDIO DECODING (TO PREVENT AV PACKAGE CRASH) ---
 def load_audio_direct(file_path):
     cmd = [
         "ffmpeg", "-i", file_path,
@@ -26,13 +36,12 @@ def load_audio_direct(file_path):
     out = subprocess.run(cmd, capture_output=True, check=True).stdout
     return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
+# --- AUDIO TRANSCRIPTION (HINDI) ---
 def analyze_audio(audio_path, progress_bar, status_text):
-    status_text.text("🎙️ AI फाइल सुन रहा है और शुद्ध हिंदी लिख रहा है...")
+    status_text.text("🎙️ AI फाइल सुन रहा है और शुद्ध हिंदी समझ रहा है...")
     progress_bar.progress(10)
     
-    # Bypass Error: AI को डायरेक्ट numpy array भेजा जा रहा है
     audio_array = load_audio_direct(audio_path)
-    
     whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
     segments, info = whisper_model.transcribe(audio_array, word_timestamps=True, language="hi")
     
@@ -51,14 +60,30 @@ def analyze_audio(audio_path, progress_bar, status_text):
         scenes.append({"start": scene_start, "end": words_data[-1].end, "text": " ".join(current_scene_words)})
     return words_data, scenes
 
+# --- SMART MULTI-KEY & MULTI-MODEL FALLBACK ENGINE ---
+def get_ai_keyword(scene_text):
+    prompt = f"Based on this Hindi text: '{scene_text}', give me exactly ONE short english search phrase (max 2 words) to find documentary B-roll footage. Only return the words, no symbols."
+    
+    for api_key in GEMINI_KEYS:
+        try:
+            client = genai.Client(api_key=api_key)
+            for model_name in TARGET_MODELS:
+                try:
+                    response = client.models.generate_content(model=model_name, contents=prompt)
+                    if response and response.text:
+                        return response.text.strip().replace('"', '')
+                except Exception as e:
+                    continue # Ek model fail hua, agla try karo
+        except Exception as e:
+            continue # Ek key fail hui, agli try karo
+            
+    raise Exception("Saari Gemini API keys expire ho chuki hain ya limits cross kar chuki hain. Kripya nayi keys dalein.")
+
+# --- FETCH EXACT DOCUMENTARY VISUALS ---
 def get_video_for_scene(scene_text, duration):
-    prompt = f"Based on this Hindi text: '{scene_text}', give me exactly ONE short english search phrase (max 2 words) to find documentary B-roll footage. Only return the words."
-    try:
-        response = client.models.generate_content(model='gemini-3.6-flash', contents=prompt)
-    except Exception:
-        response = client.models.generate_content(model='gemini-flash', contents=prompt)
-        
-    keyword = response.text.strip().replace('"', '')
+    keyword = get_ai_keyword(scene_text)
+    print(f"Searching exactly for: {keyword}")
+    
     url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={keyword}&video_type=film&orientation=horizontal&safesearch=true&order=popular"
     res = requests.get(url).json()
     
@@ -105,9 +130,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(ass_content)
 
+# --- STREAMLIT WEB GUI ---
 st.set_page_config(page_title="AI Documentary Maker", page_icon="🎬", layout="centered")
-st.title("🎬 Pure Docu-Studio AI (Pro)")
-st.write("Upload your Audio or Video file, and let AI build a cinematic documentary!")
+st.title("🎬 Pure Docu-Studio AI (Genuine Mode)")
+st.write("Upload your Audio or Video file, and AI will build a 100% relevant cinematic documentary!")
 
 uploaded_file = st.file_uploader("यहाँ अपनी फाइल अपलोड करें (Max: 500MB)", type=["mp3", "wav", "mp4", "m4a", "aac", "mov", "avi"])
 
@@ -126,7 +152,7 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
         video_clips = []
         
         for i, scene in enumerate(scenes):
-            status_text.text(f"🎬 Scene {i+1}/{len(scenes)} के लिए क्लिप्स डाउनलोड हो रही हैं...")
+            status_text.text(f"🎬 Scene {i+1}/{len(scenes)} के लिए exact क्लिप्स डाउनलोड हो रही हैं...")
             duration = scene['end'] - scene['start']
             vid_path = get_video_for_scene(scene['text'], duration)
             
@@ -137,6 +163,9 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
                 if i > 0: clip = clip.fadein(0.5)
                 video_clips.append(clip)
             progress_bar.progress(10 + int((i+1)/len(scenes) * 40))
+            
+        if not video_clips:
+            raise Exception("Koi bhi relevant visual nahi mila. Please try another topic.")
             
         status_text.text("🎞️ विजुअल्स, फेट्स, और ऑडियो को जोड़ा जा रहा है...")
         final_video = concatenate_videoclips(video_clips, method="compose")
@@ -152,7 +181,7 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
         subprocess.run(f'ffmpeg -y -i {temp_out} -vf "ass=captions.ass" -c:a copy {final_output}', shell=True)
         
         progress_bar.progress(100)
-        status_text.success("✅ बधाई हो! तुम्हारी डॉक्यूमेंट्री तैयार है!")
+        status_text.success("✅ बधाई हो! तुम्हारी 100% Genuine डॉक्यूमेंट्री तैयार है!")
         
         with open(final_output, "rb") as file:
             st.download_button(label="⬇️ Download Final Video", data=file, file_name="My_Documentary.mp4", mime="video/mp4")
