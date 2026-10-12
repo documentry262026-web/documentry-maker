@@ -3,4 +3,3 @@ faster-whisper
 google-genai
 requests
 moviepy==1.0.3
-av==11.0.0
