@@ -9,21 +9,28 @@ import requests
 from google import genai
 from groq import Groq
 from faster_whisper import WhisperModel
-import imageio_ffmpeg  # NAYA VIP PACKAGE
+import imageio_ffmpeg 
 
 # --- MAGIC FIX FOR PILLOW ANTIALIAS ERROR ---
 import PIL.Image
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
-# --- FFMPEG BYPASS (No need for packages.txt) ---
+# --- FFMPEG BYPASS ---
 FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
+
+# --- STREAMLIT MEMORY (SESSION STATE) ---
+# Ye app ko refresh hone par video bhulne nahi dega!
+if 'video_ready' not in st.session_state:
+    st.session_state.video_ready = False
+    st.session_state.video_bytes = None
 
 # --- GROQ API KEYS (Superfast) ---
 GROQ_KEYS = [
     "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",
     "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"
 ]
+# Tuhmare Bataye Hue Asli Groq Models (Fastest)
 GROQ_MODELS = ['openai/gpt-oss-20b', 'openai/gpt-oss-120b']
 
 # --- GEMINI BACKUP KEYS ---
@@ -55,7 +62,6 @@ def cleanup_temp_files():
             pass
 
 def load_audio_direct(file_path):
-    # FFMPEG_EXE use kar rahe hain direct
     cmd = [FFMPEG_EXE, "-i", file_path, "-f", "s16le", "-ac", "1", "-ar", "16000", "-"]
     out = subprocess.run(cmd, capture_output=True, check=True).stdout
     return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
@@ -88,7 +94,6 @@ def analyze_audio(audio_path, progress_bar, status_text):
 def get_ai_keyword(scene_text, status_text):
     prompt = f"Based on this Hindi text: '{scene_text}', give me exactly ONE short english search phrase (max 2 words) to find documentary B-roll footage. Only return the words, no symbols."
     
-    # GROQ ENGINE FIRST
     for attempt in range(2): 
         for idx, api_key in enumerate(GROQ_KEYS):
             try:
@@ -111,7 +116,6 @@ def get_ai_keyword(scene_text, status_text):
                 
     status_text.text("🔄 Groq busy... Using Gemini Backup Engine...")
     
-    # GEMINI BACKUP ENGINE
     for attempt in range(2): 
         for idx, api_key in enumerate(GEMINI_KEYS):
             try:
@@ -192,6 +196,8 @@ orientation = "horizontal" if "16:9" in ratio_choice else "vertical"
 uploaded_file = st.file_uploader("यहाँ अपनी फाइल अपलोड करें (Max: 500MB)", type=["mp3", "wav", "mp4", "m4a", "aac", "mov", "avi"])
 
 if uploaded_file and st.button("🔥 Generate Documentary Video"):
+    st.session_state.video_ready = False # Reset memory for new video
+    
     file_ext = uploaded_file.name.split('.')[-1]
     temp_input_file = f"temp_input.{file_ext}"
     
@@ -206,14 +212,13 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
         words_data, scenes = analyze_audio(temp_input_file, progress_bar, status_text)
         
         for i, scene in enumerate(scenes):
-            status_text.text(f"🎬 Scene {i+1}/{len(scenes)} प्रोसेस हो रहा है... (No RAM Used!)")
+            status_text.text(f"🎬 Scene {i+1}/{len(scenes)} प्रोसेस हो रहा है...")
             
             duration = scene['end'] - scene['start']
             vid_path = get_video_for_scene(scene['text'], orientation, status_text)
             out_path = f"processed_scene_{i}.mp4"
             fade_filter = ",fade=t=in:st=0:d=0.5" if i > 0 else ""
             
-            # --- PURE FFMPEG ENGINE (Bypass Streamlit limits) ---
             if vid_path:
                 cmd = f'"{FFMPEG_EXE}" -y -stream_loop -1 -i "{vid_path}" -t {duration} -vf "scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h},setsar=1{fade_filter}" -r 24 -c:v libx264 -preset superfast -an "{out_path}"'
                 subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -237,13 +242,30 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
         subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         progress_bar.progress(100)
-        status_text.success("✅ बधाई हो! तुम्हारी वीडियो 0% RAM यूज़ करके तैयार है!")
+        status_text.success("✅ वीडियो सफलतापूर्वक बन गई है!")
         
+        # VIDEO KO MEMORY ME SAVE KARNA (Taki download dabane par refresh hoke gayab na ho)
         with open(final_output, "rb") as file:
-            st.download_button(label="⬇️ Download Final Video", data=file, file_name="My_Documentary.mp4", mime="video/mp4")
+            st.session_state.video_bytes = file.read()
+            st.session_state.video_ready = True
             
     except Exception as e:
         st.error(f"Error: {str(e)}")
         
     finally:
         cleanup_temp_files()
+
+# --- DISPLAY VIDEO & DOWNLOAD BUTTON (Outside the main generation loop) ---
+if st.session_state.video_ready and st.session_state.video_bytes:
+    st.markdown("### 🎬 तुम्हारी फाइनल डॉक्यूमेंट्री:")
+    
+    # Ye raha naya Video Player
+    st.video(st.session_state.video_bytes)
+    
+    # Download Button (Ab refresh hone par gayab nahi hoga)
+    st.download_button(
+        label="⬇️ Download Final Video", 
+        data=st.session_state.video_bytes, 
+        file_name="My_Documentary.mp4", 
+        mime="video/mp4"
+    )
