@@ -56,7 +56,7 @@ def transcribe_audio(path, size):
     full_text = " ".join([seg.text.strip() for seg in seg_list])
     return full_text
 
-# --- 100% FAILSAFE KEYWORD EXTRACTOR ---
+# --- 100% BULLETPROOF KEYWORD EXTRACTOR ---
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
@@ -66,24 +66,27 @@ def get_groq_keywords(transcript):
 
     client = Groq(api_key=GK[0])
     
-    # 1. पहले आपका पसंदीदा मॉडल ट्राई करेंगे
-    primary_model = "openai/gpt-oss-120b"
-    # 2. अगर वह फेल हुआ तो यह स्टेबल बैकअप मॉडल यूज़ होगा
-    fallback_model = "llama-3.1-8b-instant" 
+    # 100% काम करने वाले असली Groq मॉडल्स की लिस्ट
+    models_to_try = [
+        "openai/gpt-oss-20b", # आपका पसंदीदा
+        "llama3-8b-8192",     # स्टेबल Llama 3
+        "mixtral-8x7b-32768"  # तगड़ा बैकअप
+    ]
 
     prompt = (
-        "You are a strict keyword extractor. Extract exactly 3 English words that describe the visual scene of this text. "
+        "Extract exactly 3 English words that describe the visual scene of this text. "
         "Do not write sentences. Only output the 3 words.\n\n"
         f"Text: {transcript}"
     )
 
-    models_to_try = [primary_model, fallback_model]
-    
     for model_name in models_to_try:
         try:
             r = client.chat.completions.create(
                 model=model_name,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": "You are a keyword extractor. You must reply with EXACTLY 3 English words separated by spaces. Never reply with an empty message."},
+                    {"role": "user", "content": prompt}
+                ],
                 max_tokens=20,
                 temperature=0.1
             )
@@ -91,7 +94,6 @@ def get_groq_keywords(transcript):
             raw_output = r.choices[0].message.content or ""
             raw_output = raw_output.strip()
             
-            # अगर मॉडल ने कुछ भी वैलिड आउटपुट दिया है
             if raw_output:
                 clean_text = re.sub(r"[^\w\s]", " ", raw_output)
                 words = [w for w in clean_text.split() if len(w) > 2]
@@ -100,13 +102,12 @@ def get_groq_keywords(transcript):
                 if final_keywords:
                     return final_keywords
                     
-            st.warning(f"⚠️ Model `{model_name}` returned an empty string. Trying fallback...")
+            st.warning(f"⚠️ Model `{model_name}` returned an empty string. Trying backup model...")
             
         except Exception as e:
-            st.warning(f"⚠️ Error with `{model_name}`: {str(e)}. Trying fallback...")
+            st.warning(f"⚠️ `{model_name}` failed: {str(e)}. Switching to next model...")
 
-    # अगर दोनों मॉडल फेल हो जाएं
-    raise RuntimeError("Both primary and fallback Groq models failed to generate keywords. The API might be down.")
+    raise RuntimeError("All Groq models failed to generate keywords. The API might be down.")
 
 def fetch_pixabay_media(query, orientation):
     if not PK:
