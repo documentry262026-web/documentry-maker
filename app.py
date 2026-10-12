@@ -39,7 +39,6 @@ def run(cmd, timeout=400):
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return res
 
-# फाइल की असली लंबाई (Exact Duration) निकालने का फंक्शन
 def get_exact_duration(path):
     exe = ffmpeg()
     result = subprocess.run([exe, "-i", path], capture_output=True, text=True)
@@ -57,42 +56,47 @@ def transcribe_audio(path, size):
     full_text = " ".join([seg.text.strip() for seg in seg_list])
     return full_text
 
-# एकदम स्ट्रिक्ट कीवर्ड फंक्शन (कोई फालतू डिफ़ॉल्ट बैकग्राउंड नहीं)
+# स्मार्ट कीवर्ड एक्सट्रैक्टर - जो मॉडल की फालतू बातों को इग्नोर करेगा
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
     
-    if not transcript or not transcript.strip():
-        raise RuntimeError("Whisper Error: Transcript is empty. No voiceover detected to generate keywords.")
+    if not transcript or len(transcript.strip()) < 2:
+        raise RuntimeError("Whisper Error: Transcript is empty. No voiceover detected.")
 
     client = Groq(api_key=GK[0])
     prompt = (
-        "Analyze the following transcript and extract 2 or 3 highly specific visual search keywords in English "
-        "for fetching a stock video that exactly matches the context. "
-        "Only provide the keywords separated by spaces, no commas, no extra text, no quotes.\n\n"
+        "You are a strict keyword extractor. Read the following transcript and output EXACTLY 2 or 3 visual keywords "
+        "that represent the core subject. DO NOT write full sentences. DO NOT say 'Here are the keywords'.\n\n"
         f"Transcript: {transcript}"
     )
     
     r = client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=30,
+        max_tokens=40,
         temperature=0.2
     )
     
-    keywords = r.choices[0].message.content.strip().replace('"', '').replace("'", "")
+    raw_output = r.choices[0].message.content.strip()
     
-    # अगर ग्रॉक ने कीवर्ड नहीं दिया, तो डिफ़ॉल्ट वीडियो लगाने के बजाय सीधा एरर दो!
-    if not keywords or keywords.lower() in ["none", "null", "empty"]:
-        raise RuntimeError("Groq AI Error: Failed to extract relevant keywords for this voiceover. Cannot proceed without accurate context.")
+    # मॉडल की फालतू बातें (जैसे "The keywords are:", "1.", "-") को साफ करना
+    clean_text = re.sub(r"(?i)^(here|are|the|keywords|visual|search|:|-|\*|\n|\d+\.)+", " ", raw_output)
+    clean_text = re.sub(r"[^\w\s]", " ", clean_text) # सारे स्पेशल कैरेक्टर्स हटाना
+    
+    # 2 से बड़े शब्दों को छांटना (a, an, the इग्नोर करना)
+    words = [w for w in clean_text.split() if len(w) > 2]
+    final_keywords = " ".join(words[:3]) # सिर्फ टॉप 3 शब्द लेना
+    
+    if not final_keywords:
+        raise RuntimeError(f"Groq AI Error: Could not extract keywords. AI returned: '{raw_output}'")
         
-    return keywords
+    return final_keywords
 
 def fetch_pixabay_media(query, orientation):
     if not PK:
         raise RuntimeError("PIXABAY_API_KEY missing from Secrets")
     
-    # 1. पहले वीडियो ढूँढेंगे
     try:
         r = requests.get(PIXABAY_VIDEO_API, params={
             "key": PK, "q": query, "video_type": "film",
@@ -108,7 +112,6 @@ def fetch_pixabay_media(query, orientation):
     except Exception:
         pass
 
-    # 2. अगर वीडियो नहीं मिला, तो फोटो ढूँढेंगे
     try:
         r = requests.get(PIXABAY_IMAGE_API, params={
             "key": PK, "q": query, "image_type": "photo",
@@ -123,7 +126,6 @@ def fetch_pixabay_media(query, orientation):
     except Exception:
         pass
 
-    # अगर उस कीवर्ड का कुछ नहीं मिला, तो सीधा एरर!
     raise RuntimeError(f"Pixabay Error: No video or image found on Pixabay for the strict keywords: '{query}'.")
 
 # ================= UI Components ================= #
