@@ -56,7 +56,7 @@ def transcribe_audio(path, size):
     full_text = " ".join([seg.text.strip() for seg in seg_list])
     return full_text
 
-# बिल्कुल सीधा और सेफ कीवर्ड एक्सट्रैक्टर (कोई कोटा वेस्ट नहीं)
+# --- 100% FAILSAFE KEYWORD EXTRACTOR ---
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
@@ -66,40 +66,47 @@ def get_groq_keywords(transcript):
 
     client = Groq(api_key=GK[0])
     
-    # अब सिर्फ 1 कॉल होगी, कोई लूप नहीं। System रोल सेट किया गया है ताकि मॉडल को समझ आए।
-    try:
-        r = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=[
-                {"role": "system", "content": "You are a keyword extractor. You must reply with EXACTLY 3 English words separated by spaces. Never reply with an empty message."},
-                {"role": "user", "content": f"Extract 3 English visual keywords from this text:\n\n{transcript}"}
-            ],
-            max_tokens=30,
-            temperature=0.3
-        )
-        
-        raw_output = r.choices[0].message.content or ""
-        raw_output = raw_output.strip()
-        
-        if not raw_output:
-            raise RuntimeError("Model returned an empty string even with a direct prompt.")
+    # 1. पहले आपका पसंदीदा मॉडल ट्राई करेंगे
+    primary_model = "openai/gpt-oss-20b"
+    # 2. अगर वह फेल हुआ तो यह स्टेबल बैकअप मॉडल यूज़ होगा
+    fallback_model = "llama-3.1-8b-instant" 
+
+    prompt = (
+        "You are a strict keyword extractor. Extract exactly 3 English words that describe the visual scene of this text. "
+        "Do not write sentences. Only output the 3 words.\n\n"
+        f"Text: {transcript}"
+    )
+
+    models_to_try = [primary_model, fallback_model]
+    
+    for model_name in models_to_try:
+        try:
+            r = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=20,
+                temperature=0.1
+            )
             
-        # मॉडल की फालतू बातें साफ़ करना
-        clean_text = re.sub(r"(?i)^(here|are|the|keywords|visual|search|:|-|\*|\n|\d+\.)+", " ", raw_output)
-        clean_text = re.sub(r"[^\w\s]", " ", clean_text)
-        
-        # 2 अक्षरों से बड़े शब्द छांटना
-        words = [w for w in clean_text.split() if len(w) > 2]
-        final_keywords = " ".join(words[:3]) 
-        
-        if not final_keywords:
-            raise RuntimeError(f"Could not extract clean words from AI output: '{raw_output}'")
+            raw_output = r.choices[0].message.content or ""
+            raw_output = raw_output.strip()
             
-        return final_keywords
-        
-    except Exception as e:
-        # अगर कोई भी एरर आती है, तो सीधा ऐप पर दिखाएगा, कोटा वेस्ट नहीं करेगा।
-        raise RuntimeError(f"Groq AI Error: {str(e)}")
+            # अगर मॉडल ने कुछ भी वैलिड आउटपुट दिया है
+            if raw_output:
+                clean_text = re.sub(r"[^\w\s]", " ", raw_output)
+                words = [w for w in clean_text.split() if len(w) > 2]
+                final_keywords = " ".join(words[:3])
+                
+                if final_keywords:
+                    return final_keywords
+                    
+            st.warning(f"⚠️ Model `{model_name}` returned an empty string. Trying fallback...")
+            
+        except Exception as e:
+            st.warning(f"⚠️ Error with `{model_name}`: {str(e)}. Trying fallback...")
+
+    # अगर दोनों मॉडल फेल हो जाएं
+    raise RuntimeError("Both primary and fallback Groq models failed to generate keywords. The API might be down.")
 
 def fetch_pixabay_media(query, orientation):
     if not PK:
@@ -163,7 +170,7 @@ if st.button("Generate Video", disabled=audio_file is None):
             st.info("🎙️ Transcribing voiceover via Whisper...")
             transcript = transcribe_audio(voice_path, whisper_size)
 
-            st.info("🤖 Extracting strict visual keywords via Groq (openai/gpt-oss-20b)...")
+            st.info("🤖 Extracting strict visual keywords via Groq...")
             search_query = custom_keyword.strip() if custom_keyword.strip() else get_groq_keywords(transcript)
             st.write(f"**Final Search Query:** `{search_query}`")
 
