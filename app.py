@@ -48,17 +48,15 @@ def get_exact_duration(path):
         return float(h) * 3600 + float(m) * 60 + float(s)
     return 10.0
 
-# 🌟 VAD FILTER APPLIED: Hallucination completely stopped
 def transcribe_and_chunk(path, size, target_length=10.0):
     model = WhisperModel(size, device="cpu", compute_type="int8")
     
-    # vad_filter=True removes silence/noise to prevent hallucination
     segments, _ = model.transcribe(
         path, 
         language="hi", 
         task="transcribe", 
         beam_size=5,
-        vad_filter=True, # 🔥 THIS IS THE MAGIC FIX
+        vad_filter=True, 
         vad_parameters=dict(min_silence_duration_ms=500),
         condition_on_previous_text=False, 
         initial_prompt="यह देवनागरी लिपि में लिखी गई शुद्ध हिंदी है।" 
@@ -66,21 +64,19 @@ def transcribe_and_chunk(path, size, target_length=10.0):
     
     seg_list = list(segments)
     if not seg_list:
-        raise RuntimeError("No voiceover detected in audio. Please ensure clear speech.")
+        raise RuntimeError("No voiceover detected in audio.")
         
     chunks = []
     current_start = 0.0
     current_text = ""
     
     for seg in seg_list:
-        # Filter out garbage characters
         clean_seg_text = re.sub(r'[^\w\s\u0900-\u097F]', '', seg.text.strip())
         if not clean_seg_text:
             continue
             
         current_text += " " + clean_seg_text
         
-        # If no start time is set yet, set it to the current segment's start
         if current_start == 0.0 and len(chunks) == 0:
             current_start = seg.start
             
@@ -113,71 +109,42 @@ def transcribe_and_chunk(path, size, target_length=10.0):
                 
     return chunks
 
-# 🌟 STRICT KEYWORD VALIDATION: No more random numbers
+# 🚀 100% NO-BACKUP, NO-BULLSHIT KEYWORD FUNCTION
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
 
     client = Groq(api_key=GK[0])
     
-    try:
-        active_models = [m.id for m in client.models.list().data]
-    except Exception:
-        active_models = []
-
-    models_to_try = ["openai/gpt-oss-20b"] 
-    
-    for am in active_models:
-        if ("llama" in am.lower() or "mixtral" in am.lower() or "gemma" in am.lower()) and am not in models_to_try:
-            models_to_try.append(am)
-            
-    models_to_try = models_to_try[:3] 
+    # सिर्फ और सिर्फ आपका वर्किंग मॉडल, कोई लूप या बैकअप नहीं!
+    model_name = "openai/gpt-oss-20b" 
 
     prompt = (
-        "You are a strict keyword generator for a stock footage site. Read this Hindi text and output EXACTLY 2 to 3 valid English visual keywords. "
-        "Never output numbers. Never output sentences. ONLY OUTPUT VALID ENGLISH WORDS.\n\n"
+        "You are a stock footage keyword generator. Read the text below (it may be in Hindi or Hinglish) and output EXACTLY 2 to 3 English visual keywords for a search query. "
+        "ONLY output the keywords. NO sentences, NO numbers, NO extra text.\n\n"
         f"Text: {transcript}"
     )
 
-    for model_name in models_to_try:
-        try:
-            r = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=20,
-                temperature=0.1
-            )
-            
-            raw_output = r.choices[0].message.content or ""
-            raw_output = raw_output.strip()
-            
-            if raw_output:
-                # Remove anything that is not a letter or space (kills random numbers)
-                clean_text = re.sub(r'[^a-zA-Z\s]', '', raw_output)
-                words = [w for w in clean_text.split() if len(w) > 2] # Ensure words are at least 3 chars long
-                final_keywords = " ".join(words[:3]) 
-                
-                # Ensure we actually have alphabetical keywords
-                if final_keywords and any(c.isalpha() for c in final_keywords):
-                    return final_keywords
-                    
-            st.warning(f"⚠️ `{model_name}` returned invalid output. Trying backup model...")
-            
-        except Exception as e:
-            st.warning(f"⚠️ `{model_name}` failed: {str(e)[:100]}. Switching to next model...")
-
-    # Fallback keyword if everything fails to prevent crash
-    st.warning("⚠️ All models failed to generate valid keywords. Using context fallback.")
+    r = client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=25,
+        temperature=0.2
+    )
     
-    # Extremely basic fallback based on text content, better than crashing
-    if "अंतरिक्ष" in transcript or "सिग्नल" in transcript:
-         return "space astronomy"
-    if "जंगल" in transcript or "पेड़" in transcript:
-         return "forest nature"
-    if "शहर" in transcript or "ट्रैफिक" in transcript:
-         return "city traffic"
-         
-    return "cinematic abstract" # Last resort
+    raw_output = r.choices[0].message.content or ""
+    raw_output = raw_output.strip()
+    
+    # सिर्फ अंग्रेजी अक्षर रखेगा (नंबर या स्पेशल कैरेक्टर हटा देगा)
+    clean_text = re.sub(r'[^a-zA-Z\s]', ' ', raw_output)
+    words = [w for w in clean_text.split() if len(w) > 1]
+    final_keywords = " ".join(words[:3]) 
+    
+    # अगर मॉडल ने खाली जवाब दिया या सिर्फ नंबर दिए, तो सीधा एरर फेंक देगा! कोई सिनेमैटिक बैकअप नहीं।
+    if not final_keywords or not any(c.isalpha() for c in final_keywords):
+        raise RuntimeError(f"Model '{model_name}' failed to generate valid keywords. Raw output was: '{raw_output}'")
+        
+    return final_keywords
 
 def fetch_pixabay_media(query, orientation):
     if not PK:
@@ -212,7 +179,7 @@ def fetch_pixabay_media(query, orientation):
     except Exception:
         pass
 
-    raise RuntimeError(f"No video/image found for: '{query}'")
+    raise RuntimeError(f"Exact Error: No video/image found on Pixabay for the query: '{query}'")
 
 # ================= UI Components ================= #
 st.header("1. Upload Voiceover")
@@ -252,9 +219,11 @@ if st.button("Generate Cinematic Video", disabled=audio_file is None):
                 st.write(f"---")
                 st.write(f"**Scene {i+1} ({chunk['duration']:.1f}s):** {chunk['text']}")
                 
+                # सीधा आपके पसंदीदा मॉडल को कॉल करेगा
                 query = get_groq_keywords(chunk['text'])
                 st.write(f"**AI Search Query:** `{query}`")
                 
+                # सीधा पिक्साबे को कॉल करेगा (नहीं मिला तो क्रैश होगा)
                 media_info = fetch_pixabay_media(query, "vertical" if width < height else "horizontal")
                 
                 media_file = os.path.join(tmp_dir, f"media_{i}" + (".mp4" if media_info["type"] == "video" else ".jpg"))
