@@ -49,11 +49,9 @@ def get_exact_duration(path):
         return float(h) * 3600 + float(m) * 60 + float(s)
     return 10.0
 
-# 🚀 WHISPER HALLUCINATION COMPLETELY KILLED
 def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
     model = WhisperModel(size, device="cpu", compute_type="int8")
     
-    # 🎯 beam_size=1 & temperature=0.0 stops Whisper from generating Russian/Korean garbage
     segments, _ = model.transcribe(
         path, 
         language="hi", 
@@ -68,6 +66,13 @@ def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
     seg_list = list(segments)
     chunks = []
     
+    # 🌟 पूरा टेक्स्ट एक साथ निकाल लिया ताकि अगर कोई हिस्सा खाली हो, तो इसे यूज़ कर सकें
+    full_clean_text = ""
+    for seg in seg_list:
+        clean = re.sub(r'[^a-zA-Z\u0900-\u097F\s]', ' ', seg.text.strip())
+        full_clean_text += " " + clean
+    full_clean_text = re.sub(r'\s+', ' ', full_clean_text).strip()
+    
     num_chunks = math.ceil(total_audio_duration / target_length)
     
     for i in range(num_chunks):
@@ -81,7 +86,6 @@ def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
         chunk_text = ""
         for seg in seg_list:
             if seg.start < end_time and seg.end > start_time:
-                # 🎯 MAGIC REGEX: ONLY allow A-Z, a-z, and Devanagari (Hindi) characters. Kills all foreign garbage!
                 clean_seg_text = re.sub(r'[^a-zA-Z\u0900-\u097F\s]', ' ', seg.text.strip())
                 clean_seg_text = re.sub(r'\s+', ' ', clean_seg_text).strip()
                 if clean_seg_text:
@@ -89,11 +93,11 @@ def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
                 
         chunk_text = chunk_text.strip()
         
+        # 🌟 BUG FIX: अगर 10 सेकंड में आवाज़ नहीं है, तो पूरी वीडियो की कहानी (full_clean_text) ले लेगा
         if not chunk_text and chunks:
             chunk_text = chunks[-1]["text"]
         elif not chunk_text and not chunks:
-            # First chunk is entirely empty, meaning no valid voice was found
-            chunk_text = "space universe mystery" # Safe fallback just to kickstart, will only happen if first 10s is silent
+            chunk_text = full_clean_text if full_clean_text else "nature landscape"
             
         chunks.append({
             "text": chunk_text,
@@ -104,7 +108,7 @@ def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
                 
     return chunks
 
-# 🚀 100% PURE, NO BACKUP KEYWORD GENERATOR
+# 🚀 100% SIMPLE PROMPT (As you requested: "Give me keywords only")
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
@@ -112,45 +116,26 @@ def get_groq_keywords(transcript):
     client = Groq(api_key=GK[0])
     model_name = "openai/gpt-oss-20b" 
 
-    prompt = f"""You are a professional stock-footage search keyword generator for a Hindi voiceover-to-video application.
-
-TASK:
-Read the Hindi sentence provided below and identify the single most visually relevant scene that represents what is happening in that sentence.
-
-OUTPUT RULES — STRICT:
-1. Return exactly ONE short English search query containing 2–4 words.
-2. Describe a concrete, filmable visual that could realistically be found on Pixabay.
-3. Prefer specific objects, people, actions, locations, or events mentioned or clearly implied by the sentence.
-4. Translate the meaning into English before selecting the visual.
-5. Do not return Hindi, explanations, introductions, quotation marks, labels, markdown, or punctuation.
-6. Never return an empty response.
-7. Never return the words "none", "unknown", "N/A", "keyword", or "B-roll".
-8. If the sentence is abstract, choose the closest concrete visual metaphor.
-9. If the sentence is unclear, select the most plausible visual supported by its meaning.
-10. Do not use generic fallback terms such as "nature" or "documentary" unless the sentence genuinely describes them.
-
-Now generate the visual search query for this sentence:
-{transcript}
-
-Return ONLY the query."""
+    # 🌟 बिल्कुल सिंपल प्रॉम्प्ट, जिससे यह मॉडल कभी हैंग नहीं होगा
+    prompt = f"Give me 3 English visual search keywords ONLY for this text. Do not write sentences, just words:\n\n{transcript}"
 
     r = client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=40,
+        max_tokens=30,
         temperature=0.2
     )
     
     raw_output = r.choices[0].message.content or ""
     raw_output = raw_output.strip()
     
+    # फालतू अक्षर हटाकर सिर्फ इंग्लिश वर्ड रखेगा
     clean_text = re.sub(r'[^a-zA-Z\s]', ' ', raw_output)
     words = [w for w in clean_text.split() if len(w) > 1]
     final_keywords = " ".join(words[:4]) 
     
-    # 🎯 STRICT FAILURE: NO BACKUPS ALLOWED
     if not final_keywords or not any(c.isalpha() for c in final_keywords):
-        raise RuntimeError(f"Model '{model_name}' failed to generate valid keywords. Raw output was: '{raw_output}'")
+        raise RuntimeError(f"Model '{model_name}' failed to generate keywords. Raw output was: '{raw_output}'")
         
     return final_keywords
 
