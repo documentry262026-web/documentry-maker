@@ -109,47 +109,94 @@ def correct_hindi(data):
         s["text"]=" ".join(w["text"] for w in s["words"])
     return data
 
-def make_ass(data,normal,highlight,font_size,width,height):
+def make_ass(data, normal, highlight, font_size, width, height):
     def color(c):
-        c=c.lstrip("#")
-        return "&H00"+c[4:6]+c[2:4]+c[0:2]
+        c = c.lstrip("#")
+        return "&H00" + c[4:6] + c[2:4] + c[0:2]
+
     def stamp(t):
-        cs=max(0,round(t*100))
-        h,cs=divmod(cs,360000)
-        m,cs=divmod(cs,6000)
-        s,cs=divmod(cs,100)
+        cs = max(0, round(t * 100))
+        h, cs = divmod(cs, 360000)
+        m, cs = divmod(cs, 6000)
+        s, cs = divmod(cs, 100)
         return f"{h}:{m:02}:{s:02}.{cs:02}"
 
-    # Karaoke changes from normal to highlight as each word is spoken.
-    head=f"""[Script Info]
+    head = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
 PlayResY: {height}
 WrapStyle: 2
+
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,Noto Sans Devanagari,{font_size},{color(highlight)},{color(normal)},&H80000000,&H80000000,-1,0,1,3,1,2,35,35,{max(45,int(height*.09))},1
+Style: Default,Noto Sans Devanagari,{font_size},{color(highlight)},{color(normal)},&H80000000,&H80000000,-1,0,1,3,1,2,35,35,{max(45, int(height * 0.09))},1
+
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 """
-    lines=[head]
-    words=[w for s in data for w in s.get("words",[]) if w["text"].strip()]
-    # Maximum three words per caption group
-    for i in range(0,len(words),3):
-        group=words[i:i+3]
-        start=group[0]["start"]
-        end=group[-1]["end"]
-        parts=[]
-        for j,w in enumerate(group):
-            nxt=group[j+1]["start"] if j+1<len(group) else w["end"]
-            duration=max(1,round((nxt-w["start"])*100))
-            word=w["text"].replace("{","(").replace("}",")")
-            parts.append("{\\k"+str(duration)+"}"+word)
+
+    words = [
+        w for s in data
+        for w in s.get("words", [])
+        if w.get("text", "").strip()
+    ]
+
+    lines = [head]
+    i = 0
+
+    while i < len(words):
+        # Default: 4 words per caption group.
+        end_i = min(i + 4, len(words))
+
+        # Fast speech: allow up to 6 words in one group.
+        if end_i < len(words):
+            duration4 = words[end_i - 1]["end"] - words[i]["start"]
+            if duration4 < 1.35:
+                end_i = min(i + 6, len(words))
+
+        # Break the group at a noticeable pause.
+        for j in range(i, end_i - 1):
+            gap = words[j + 1]["start"] - words[j]["end"]
+            if gap > 0.45:
+                end_i = j + 1
+                break
+
+        group = words[i:end_i]
+        start = group[0]["start"]
+        end = max(group[-1]["end"], start + 0.2)
+
+        parts = []
+
+        for j, word in enumerate(group):
+            next_start = (
+                group[j + 1]["start"]
+                if j + 1 < len(group)
+                else end
+            )
+
+            word_end = max(word["end"], next_start)
+            duration = max(
+                1,
+                round((word_end - word["start"]) * 100)
+            )
+
+            text = (
+                word["text"]
+                .replace("\\", r"\\")
+                .replace("{", r"\{")
+                .replace("}", r"\}")
+            )
+
+            parts.append(r"{\k" + str(duration) + "}" + text)
+
         lines.append(
-            f"Dialogue: 0,{stamp(start)},{stamp(end)},Default,,0,0,0,,"
-            +" ".join(parts)
+            f"Dialogue: 0,{stamp(start)},{stamp(end)},"
+            "Default,,0,0,0,," + " ".join(parts)
         )
-    return "\n".join(lines)
+
+        i = end_i
+
+    return "\n".join(lines) + "\n"
 
 def pixabay(q,orientation):
     if not PK:
