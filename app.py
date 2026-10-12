@@ -48,18 +48,17 @@ def get_exact_duration(path):
         return float(h) * 3600 + float(m) * 60 + float(s)
     return 10.0
 
+# 🌟 WHISPER FIX: 100% Devanagari Hindi Only
 def transcribe_and_chunk(path, size, target_length=10.0):
     model = WhisperModel(size, device="cpu", compute_type="int8")
     
-    # 🌟 HALLUCINATION FIX: condition_on_previous_text=False 
-    # यह Whisper को अजीब भाषाएं और 30 सेकंड का कचरा बनाने से रोकेगा!
     segments, _ = model.transcribe(
         path, 
         language="hi", 
         task="transcribe", 
         beam_size=5,
         condition_on_previous_text=False, 
-        initial_prompt="हिंदी" 
+        initial_prompt="यह देवनागरी लिपि में लिखी गई शुद्ध हिंदी है।" # Urdu/Roman Fix
     )
     
     seg_list = list(segments)
@@ -101,50 +100,42 @@ def transcribe_and_chunk(path, size, target_length=10.0):
                 
     return chunks
 
+# 🌟 GROQ 404/400 ERROR FIX: Dynamic Model Fetching
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
 
     client = Groq(api_key=GK[0])
     
-    # 🌟 GROQ DECOMMISSION FIX: 100% Active and Working Models
-    models_to_try = [
-        "openai/gpt-oss-20b",        # आपका फेवरेट 
-        "llama-3.3-70b-versatile",   # नया और सबसे पावरफुल
-        "llama-3.1-8b-instant",      # नया और सबसे फास्ट
-        "mixtral-8x7b-32768"         # एवरग्रीन बैकअप
-    ]
+    # 1. API से ज़िंदा (Active) मॉडल्स की लिस्ट खुद निकालना
+    try:
+        active_models = [m.id for m in client.models.list().data]
+    except Exception:
+        active_models = []
 
-    prompt = f"""You are a professional stock-footage search keyword generator for a Hindi voiceover-to-video application.
+    # 2. मॉडल्स को प्राथमिकता देना
+    models_to_try = ["openai/gpt-oss-20b"] # आपका फेवरेट सबसे पहले
+    
+    # 3. बैकअप के लिए आपके अकाउंट के चालू मॉडल्स ऐड करना
+    for am in active_models:
+        if ("llama" in am.lower() or "mixtral" in am.lower() or "gemma" in am.lower()) and am not in models_to_try:
+            models_to_try.append(am)
+            
+    models_to_try = models_to_try[:3] # टॉप 3 मॉडल्स ट्राई करेगा
 
-TASK:
-Read the Hindi sentence provided below and identify the single most visually relevant scene that represents what is happening in that sentence.
-
-OUTPUT RULES — STRICT:
-1. Return exactly ONE short English search query containing 2–4 words.
-2. Describe a concrete, filmable visual that could realistically be found on Pixabay.
-3. Prefer specific objects, people, actions, locations, or events mentioned or clearly implied by the sentence.
-4. Translate the meaning into English before selecting the visual.
-5. Do not return Hindi, explanations, introductions, quotation marks, labels, markdown, or punctuation.
-6. Never return an empty response.
-7. Never return the words "none", "unknown", "N/A", "keyword", or "B-roll".
-8. If the sentence is abstract, choose the closest concrete visual metaphor.
-9. If the sentence is unclear, select the most plausible visual supported by its meaning.
-10. Do not use generic fallback terms such as "nature" or "documentary" unless the sentence genuinely describes them.
-
-Now generate the visual search query for this sentence:
-{transcript}
-
-Return ONLY the query."""
+    # सिंपल और स्ट्रिक्ट प्रॉम्प्ट
+    prompt = (
+        "You are a strict keyword generator. Read this text and output EXACTLY 2 to 3 visual English keywords for a stock footage search. "
+        "Never write sentences. Never write explanations. ONLY OUTPUT THE WORDS.\n\n"
+        f"Text: {transcript}"
+    )
 
     for model_name in models_to_try:
         try:
             r = client.chat.completions.create(
                 model=model_name,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=25,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=20,
                 temperature=0.1
             )
             
@@ -153,18 +144,18 @@ Return ONLY the query."""
             
             if raw_output:
                 clean_text = re.sub(r"[^\w\s]", " ", raw_output)
-                words = [w for w in clean_text.split() if len(w) > 0]
+                words = [w for w in clean_text.split() if len(w) > 1]
                 final_keywords = " ".join(words[:4]) 
                 
                 if final_keywords:
                     return final_keywords
                     
-            st.warning(f"⚠️ Model `{model_name}` returned an empty string. Trying backup model...")
+            st.warning(f"⚠️ `{model_name}` returned empty string. Trying backup model...")
             
         except Exception as e:
-            st.warning(f"⚠️ `{model_name}` failed: {str(e)}. Switching to next model...")
+            st.warning(f"⚠️ `{model_name}` failed: {str(e)[:100]}. Switching to next model...")
 
-    raise RuntimeError("All Groq models failed. Please check if your API key has quota left.")
+    raise RuntimeError("All available Groq models failed. Please check your API key quota.")
 
 def fetch_pixabay_media(query, orientation):
     if not PK:
