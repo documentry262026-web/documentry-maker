@@ -39,10 +39,12 @@ def run(cmd, timeout=400):
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return res
 
+# 🐛 BUG FIXED: अब यह एग्जैक्ट सेकंड (बिना डेसिमल के) को भी सही से पकड़ेगा
 def get_exact_duration(path):
     exe = ffmpeg()
     result = subprocess.run([exe, "-i", path], capture_output=True, text=True)
-    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", result.stderr)
+    # Regex Fixed: (\d+(?:\.\d+)?) ensures it catches both '47' and '47.50'
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr)
     if match:
         h, m, s = match.groups()
         return float(h) * 3600 + float(m) * 60 + float(s)
@@ -56,9 +58,7 @@ def transcribe_audio(path, size):
     full_text = " ".join([seg.text.strip() for seg in seg_list])
     return full_text
 
-# ========================================================= #
-# 100% BULLETPROOF KEYWORD EXTRACTOR WITH YOUR PROMPT
-# ========================================================= #
+# 🐛 BUG FIXED: Token limit हटाई गई और सिंपल प्रॉम्प्ट डाला गया
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
@@ -68,78 +68,34 @@ def get_groq_keywords(transcript):
 
     client = Groq(api_key=GK[0])
     
-    # 100% Real, Working Groq Models
-    models_to_try = [
-        "openai/gpt-oss-20b",         # Extremely fast, default 8B model
-        "gemma2-9b-it",           # Great for Hindi-English tasks
-        "mixtral-8x7b-32768"      # Heavy duty fallback
-    ]
+    # बिल्कुल सिंपल प्रॉम्प्ट जैसा आपने बताया
+    prompt = (
+        "Read this Hindi text and give me ONLY 2 to 3 English keywords to search for a stock video. "
+        "Do NOT write any sentences, DO NOT say 'here are keywords'. ONLY GIVE THE KEYWORDS.\n\n"
+        f"Text: {transcript}"
+    )
 
-    # Your Masterpiece Prompt!
-    prompt = f"""You are a professional stock-footage search keyword generator for a Hindi voiceover-to-video application.
-
-TASK:
-Read the Hindi sentence provided below and identify the single most visually relevant scene that represents what is happening in that sentence.
-
-OUTPUT RULES — STRICT:
-1. Return exactly ONE short English search query containing 2–4 words.
-2. Describe a concrete, filmable visual that could realistically be found on Pixabay.
-3. Prefer specific objects, people, actions, locations, or events mentioned or clearly implied by the sentence.
-4. Translate the meaning into English before selecting the visual.
-5. Do not return Hindi, explanations, introductions, quotation marks, labels, markdown, or punctuation.
-6. Never return an empty response.
-7. Never return the words "none", "unknown", "N/A", "keyword", or "B-roll".
-8. If the sentence is abstract, choose the closest concrete visual metaphor.
-9. If the sentence is unclear, select the most plausible visual supported by its meaning.
-10. Do not use generic fallback terms such as "nature" or "documentary" unless the sentence genuinely describes them.
-
-EXAMPLES:
-Hindi: "सड़क पर बहुत ज्यादा ट्रैफिक था"
-Output: busy city traffic
-
-Hindi: "वैज्ञानिकों को अंतरिक्ष से सिग्नल मिला"
-Output: radio telescope observatory
-
-Hindi: "बच्चे मैदान में क्रिकेट खेल रहे थे"
-Output: children playing cricket
-
-Hindi: "एक आदमी जंगल में अकेला चल रहा था"
-Output: man walking forest
-
-Now generate the visual search query for this sentence:
-{transcript}
-
-Return ONLY the query."""
-
-    for model_name in models_to_try:
-        try:
-            r = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=15,
-                temperature=0.1
-            )
-            
-            raw_output = r.choices[0].message.content or ""
-            raw_output = raw_output.strip()
-            
-            if raw_output:
-                # Clean any stray punctuation the AI might still throw
-                clean_text = re.sub(r"[^\w\s]", " ", raw_output)
-                words = [w for w in clean_text.split() if len(w) > 0]
-                final_keywords = " ".join(words[:4]) # Picking max 4 words
-                
-                if final_keywords:
-                    return final_keywords
-                    
-            st.warning(f"⚠️ Model `{model_name}` returned an empty string. Trying backup model...")
-            
-        except Exception as e:
-            st.warning(f"⚠️ `{model_name}` failed: {str(e)}. Switching to next model...")
-
-    raise RuntimeError("All Groq models failed. The API might be down or key is exhausted.")
+    r = client.chat.completions.create(
+        model="openai/gpt-oss-20b",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=150,  # FIXED: पहले यह 15 था जिससे मॉडल कट जाता था और खाली जवाब आता था
+        temperature=0.3
+    )
+    
+    raw_output = r.choices[0].message.content or ""
+    raw_output = raw_output.strip()
+    
+    # फालतू कैरेक्टर्स साफ करना
+    clean_text = re.sub(r"[^\w\s]", " ", raw_output)
+    words = [w for w in clean_text.split() if len(w) > 1]
+    
+    # टॉप 3 या 4 कीवर्ड्स उठाना
+    final_keywords = " ".join(words[:4]) 
+    
+    if not final_keywords:
+        raise RuntimeError(f"Groq AI Error: AI failed to output valid keywords. Raw output was: '{raw_output}'")
+        
+    return final_keywords
 
 def fetch_pixabay_media(query, orientation):
     if not PK:
@@ -174,7 +130,7 @@ def fetch_pixabay_media(query, orientation):
     except Exception:
         pass
 
-    raise RuntimeError(f"Pixabay Error: No video or image found on Pixabay for the keywords: '{query}'.")
+    raise RuntimeError(f"Pixabay Error: No video or image found on Pixabay for the strict keywords: '{query}'.")
 
 # ================= UI Components ================= #
 st.header("1. Upload Voiceover")
@@ -203,7 +159,7 @@ if st.button("Generate Video", disabled=audio_file is None):
             st.info("🎙️ Transcribing voiceover via Whisper...")
             transcript = transcribe_audio(voice_path, whisper_size)
 
-            st.info("🤖 Extracting strict visual keywords via Groq...")
+            st.info(f"🤖 Extracting keywords via Groq (openai/gpt-oss-20b)...")
             search_query = custom_keyword.strip() if custom_keyword.strip() else get_groq_keywords(transcript)
             st.write(f"**Final Search Query:** `{search_query}`")
 
