@@ -11,24 +11,19 @@ from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
 import PIL.Image
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
-# ---------------------------------------------
 
-# API Keys (Ab GUI se bhi dal sakti hain, par default yahan set hain)
 PIXABAY_API_KEY = "57871281-bac58345c5fba7b07f0655556"
 GEMINI_API_KEY = "AQ.Ab8RN6IVQYNwTLU-r1GGLqI8Jcf-eNva9G0WfwRy6mUcegUTMQ"
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 def analyze_audio(audio_path, progress_bar, status_text):
-    status_text.text("🎙️ AI तुम्हारी आवाज़ सुन रहा है और शुद्ध हिंदी लिख रहा है...")
+    status_text.text("🎙️ AI फाइल सुन रहा है और शुद्ध हिंदी लिख रहा है...")
     progress_bar.progress(10)
     
     whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
-    # Yahan language="hi" laga diya hai, ab sirf pure Hindi (Devanagari) me caption aayenge
     segments, info = whisper_model.transcribe(audio_path, word_timestamps=True, language="hi")
     
-    words_data = []
-    scenes = []
-    current_scene_words = []
+    words_data, scenes, current_scene_words = [], [], []
     scene_start = 0.0
     
     for segment in segments:
@@ -44,7 +39,7 @@ def analyze_audio(audio_path, progress_bar, status_text):
     return words_data, scenes
 
 def get_video_for_scene(scene_text, duration):
-    prompt = f"Based on this Hindi text: '{scene_text}', give me exactly ONE short english search phrase (max 2 words) to find documentary B-roll footage on stock sites. Only return the words, no symbols."
+    prompt = f"Based on this Hindi text: '{scene_text}', give me exactly ONE short english search phrase (max 2 words) to find documentary B-roll footage. Only return the words."
     try:
         response = client.models.generate_content(model='gemini-3.6-flash', contents=prompt)
     except Exception:
@@ -64,18 +59,14 @@ def get_video_for_scene(scene_text, duration):
     return None
 
 def apply_cinematic_effects(clip, duration):
-    # Smart Documentary Engine: Random Zoom In & Zoom Out
     effect = random.choice(['zoom_in', 'zoom_out'])
     if effect == 'zoom_in':
         clip = clip.resize(lambda t: 1 + 0.03 * t)
     else:
-        clip = clip.resize(lambda t: 1.15 - 0.03 * t) # Starts zoomed in, zooms out
-    
-    clip = clip.set_position(('center', 'center')).subclip(0, duration)
-    return clip
+        clip = clip.resize(lambda t: 1.15 - 0.03 * t)
+    return clip.set_position(('center', 'center')).subclip(0, duration)
 
 def generate_ass_subtitles(words_data, output_file="captions.ass"):
-    # Hindi Fonts aur size adjust kar diye gaye hain taaki perfect lagein
     ass_content = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1920
@@ -90,89 +81,71 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     def format_time(seconds):
         h, m, s = int(seconds // 3600), int((seconds % 3600) // 60), int(seconds % 60)
-        cs = int((seconds % 1) * 100)
-        return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+        return f"{h}:{m:02d}:{s:02d}.{int((seconds % 1) * 100):02d}"
 
-    batch_size = 5
-    for i in range(0, len(words_data), batch_size):
-        batch = words_data[i:i+batch_size]
+    for i in range(0, len(words_data), 5):
+        batch = words_data[i:i+5]
         for highlight_idx in range(len(batch)):
-            text_line = ""
-            for idx, w in enumerate(batch):
-                clean_word = w.word.strip()
-                if idx == highlight_idx:
-                    text_line += f"{{\\c&H00FFFF&}}{clean_word}{{\\c&HFFFFFF&}} "
-                else:
-                    text_line += f"{clean_word} "
-            
+            text_line = " ".join([f"{{\\c&H00FFFF&}}{w.word.strip()}{{\\c&HFFFFFF&}}" if idx == highlight_idx else w.word.strip() for idx, w in enumerate(batch)])
             ass_content += f"Dialogue: 0,{format_time(batch[highlight_idx].start)},{format_time(batch[highlight_idx].end)},Default,,0,0,0,,{text_line.strip()}\n"
+    
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(ass_content)
 
-# --- STREAMLIT GUI DASHBOARD ---
 st.set_page_config(page_title="AI Documentary Maker", page_icon="🎬", layout="centered")
 st.title("🎬 Pure Docu-Studio AI (Pro)")
-st.write("Upload your voiceover, and let AI build a cinematic documentary with pure Hindi captions!")
+st.write("Upload your Audio or Video file, and let AI build a cinematic documentary!")
 
-uploaded_audio = st.file_uploader("यहाँ अपना Voiceover (MP3) अपलोड करें", type=["mp3", "wav"])
+# अब फाइल टाइप में कुछ भी अपलोड हो सकता है (MP3, MP4, WAV, M4A)
+uploaded_file = st.file_uploader("यहाँ अपनी फाइल अपलोड करें (Max: 500MB)", type=["mp3", "wav", "mp4", "m4a", "aac", "mov", "avi"])
 
-if uploaded_audio and st.button("🔥 Generate Documentary Video"):
-    with open("temp_audio.mp3", "wb") as f:
-        f.write(uploaded_audio.getbuffer())
+if uploaded_file and st.button("🔥 Generate Documentary Video"):
+    # ओरिजिनल फाइल एक्सटेंशन सेव करेगा
+    file_ext = uploaded_file.name.split('.')[-1]
+    temp_input_file = f"temp_input.{file_ext}"
+    
+    with open(temp_input_file, "wb") as f:
+        f.write(uploaded_file.getbuffer())
         
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     try:
-        words_data, scenes = analyze_audio("temp_audio.mp3", progress_bar, status_text)
-        
+        words_data, scenes = analyze_audio(temp_input_file, progress_bar, status_text)
         video_clips = []
-        total_scenes = len(scenes)
         
         for i, scene in enumerate(scenes):
-            status_text.text(f"🎬 Scene {i+1}/{total_scenes} के लिए cinematic क्लिप्स डाउनलोड हो रही हैं...")
+            status_text.text(f"🎬 Scene {i+1}/{len(scenes)} के लिए क्लिप्स डाउनलोड हो रही हैं...")
             duration = scene['end'] - scene['start']
             vid_path = get_video_for_scene(scene['text'], duration)
             
             if vid_path:
                 clip = VideoFileClip(vid_path).resize((1920, 1080))
-                if clip.duration < duration:
-                    clip = clip.loop(duration=duration)
-                
+                if clip.duration < duration: clip = clip.loop(duration=duration)
                 clip = apply_cinematic_effects(clip, duration)
-                
-                # Fade in effect to make transitions smooth like documentaries
-                if i > 0:
-                    clip = clip.fadein(0.5)
+                if i > 0: clip = clip.fadein(0.5)
                 video_clips.append(clip)
-            progress_bar.progress(10 + int((i+1)/total_scenes * 40))
+            progress_bar.progress(10 + int((i+1)/len(scenes) * 40))
             
         status_text.text("🎞️ विजुअल्स, फेट्स, और ऑडियो को जोड़ा जा रहा है...")
         final_video = concatenate_videoclips(video_clips, method="compose")
-        final_video = final_video.set_audio(AudioFileClip("temp_audio.mp3"))
+        # AudioFileClip वीडियो में से अपने आप ऑडियो निकाल लेगा
+        final_video = final_video.set_audio(AudioFileClip(temp_input_file))
         
         temp_out = "temp_render.mp4"
         final_video.write_videofile(temp_out, fps=24, codec="libx264", audio_codec="aac", logger=None)
-        progress_bar.progress(85)
         
-        status_text.text("📝 शुद्ध हिंदी के कैप्शंस (Yellow Highlight) वीडियो पर जलाए जा रहे हैं...")
+        status_text.text("📝 कैप्शंस (Yellow Highlight) वीडियो पर जलाए जा रहे हैं...")
         generate_ass_subtitles(words_data)
         
         final_output = "FINAL_DOCUMENTARY.mp4"
-        cmd = f'ffmpeg -y -i {temp_out} -vf "ass=captions.ass" -c:a copy {final_output}'
-        subprocess.run(cmd, shell=True)
+        subprocess.run(f'ffmpeg -y -i {temp_out} -vf "ass=captions.ass" -c:a copy {final_output}', shell=True)
         
         progress_bar.progress(100)
         status_text.success("✅ बधाई हो! तुम्हारी डॉक्यूमेंट्री तैयार है!")
         
-        # GUI me Video Download Button
         with open(final_output, "rb") as file:
-            st.download_button(
-                label="⬇️ Download Final Video",
-                data=file,
-                file_name="My_Documentary.mp4",
-                mime="video/mp4"
-            )
+            st.download_button(label="⬇️ Download Final Video", data=file, file_name="My_Documentary.mp4", mime="video/mp4")
             
     except Exception as e:
         st.error(f"Error: {str(e)}")
