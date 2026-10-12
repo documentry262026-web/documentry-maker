@@ -1,5 +1,6 @@
 import os
 import re
+import math
 import tempfile
 import subprocess
 from pathlib import Path
@@ -48,7 +49,8 @@ def get_exact_duration(path):
         return float(h) * 3600 + float(m) * 60 + float(s)
     return 10.0
 
-def transcribe_and_chunk(path, size, target_length=10.0):
+# 🚀 STRICT 10-SECOND MATH CHUNKING 
+def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
     model = WhisperModel(size, device="cpu", compute_type="int8")
     
     segments, _ = model.transcribe(
@@ -63,84 +65,89 @@ def transcribe_and_chunk(path, size, target_length=10.0):
     )
     
     seg_list = list(segments)
-    if not seg_list:
-        raise RuntimeError("No voiceover detected in audio.")
-        
     chunks = []
-    current_start = 0.0
-    current_text = ""
     
-    for seg in seg_list:
-        clean_seg_text = re.sub(r'[^\w\s\u0900-\u097F]', '', seg.text.strip())
-        if not clean_seg_text:
+    # गणित लगाकर वीडियो को एक्जैक्ट 10-10 सेकंड में काटेंगे
+    num_chunks = math.ceil(total_audio_duration / target_length)
+    
+    for i in range(num_chunks):
+        start_time = i * target_length
+        end_time = min((i + 1) * target_length, total_audio_duration)
+        dur = end_time - start_time
+        
+        if dur <= 0:
             continue
             
-        current_text += " " + clean_seg_text
+        chunk_text = ""
+        # इस 10 सेकंड के अंदर जो भी बोला गया, उसे निकालो
+        for seg in seg_list:
+            if seg.start < end_time and seg.end > start_time:
+                clean_seg_text = re.sub(r'[^\w\s\u0900-\u097F]', '', seg.text.strip())
+                chunk_text += " " + clean_seg_text
+                
+        chunk_text = chunk_text.strip()
         
-        if current_start == 0.0 and len(chunks) == 0:
-            current_start = seg.start
+        # 💡 SMART FIX: अगर इस 10 सेकंड में शांति/म्यूजिक है, तो पिछले सीन का टेक्स्ट ले लो ताकि AI क्रैश न हो!
+        if not chunk_text and chunks:
+            chunk_text = chunks[-1]["text"]
+        elif not chunk_text and not chunks:
+            raise RuntimeError("Audio Error: No voice detected in the first 10 seconds. Cannot start video.")
             
-        if (seg.end - current_start) >= target_length:
-            chunks.append({
-                "text": current_text.strip(),
-                "start": current_start,
-                "end": seg.end,
-                "duration": seg.end - current_start
-            })
-            current_start = seg.end
-            current_text = ""
-            
-    if current_text.strip():
-        if not chunks:
-            chunks.append({"text": current_text.strip(), "start": 0.0, "end": seg_list[-1].end, "duration": seg_list[-1].end})
-        else:
-            rem_duration = seg_list[-1].end - current_start
-            if rem_duration < 5.0:
-                chunks[-1]["text"] += " " + current_text.strip()
-                chunks[-1]["end"] = seg_list[-1].end
-                chunks[-1]["duration"] = chunks[-1]["end"] - chunks[-1]["start"]
-            else:
-                chunks.append({
-                    "text": current_text.strip(),
-                    "start": current_start,
-                    "end": seg_list[-1].end,
-                    "duration": rem_duration
-                })
+        chunks.append({
+            "text": chunk_text,
+            "start": start_time,
+            "end": end_time,
+            "duration": dur
+        })
                 
     return chunks
 
-# 🚀 100% NO-BACKUP, NO-BULLSHIT KEYWORD FUNCTION
+# 🚀 100% PURE: ONLY openai/gpt-oss-20b + YOUR EXACT PROMPT (NO BACKUPS)
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
 
     client = Groq(api_key=GK[0])
-    
-    # सिर्फ और सिर्फ आपका वर्किंग मॉडल, कोई लूप या बैकअप नहीं!
     model_name = "openai/gpt-oss-20b" 
 
-    prompt = (
-        "You are a stock footage keyword generator. Read the text below (it may be in Hindi or Hinglish) and output EXACTLY 2 to 3 English visual keywords for a search query. "
-        "ONLY output the keywords. NO sentences, NO numbers, NO extra text.\n\n"
-        f"Text: {transcript}"
-    )
+    # बिल्कुल आपका दिया हुआ प्रॉम्प्ट!
+    prompt = f"""You are a professional stock-footage search keyword generator for a Hindi voiceover-to-video application.
+
+TASK:
+Read the Hindi sentence provided below and identify the single most visually relevant scene that represents what is happening in that sentence.
+
+OUTPUT RULES — STRICT:
+1. Return exactly ONE short English search query containing 2–4 words.
+2. Describe a concrete, filmable visual that could realistically be found on Pixabay.
+3. Prefer specific objects, people, actions, locations, or events mentioned or clearly implied by the sentence.
+4. Translate the meaning into English before selecting the visual.
+5. Do not return Hindi, explanations, introductions, quotation marks, labels, markdown, or punctuation.
+6. Never return an empty response.
+7. Never return the words "none", "unknown", "N/A", "keyword", or "B-roll".
+8. If the sentence is abstract, choose the closest concrete visual metaphor.
+9. If the sentence is unclear, select the most plausible visual supported by its meaning.
+10. Do not use generic fallback terms such as "nature" or "documentary" unless the sentence genuinely describes them.
+
+Now generate the visual search query for this sentence:
+{transcript}
+
+Return ONLY the query."""
 
     r = client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=25,
+        max_tokens=40,
         temperature=0.2
     )
     
     raw_output = r.choices[0].message.content or ""
     raw_output = raw_output.strip()
     
-    # सिर्फ अंग्रेजी अक्षर रखेगा (नंबर या स्पेशल कैरेक्टर हटा देगा)
     clean_text = re.sub(r'[^a-zA-Z\s]', ' ', raw_output)
     words = [w for w in clean_text.split() if len(w) > 1]
-    final_keywords = " ".join(words[:3]) 
+    final_keywords = " ".join(words[:4]) 
     
-    # अगर मॉडल ने खाली जवाब दिया या सिर्फ नंबर दिए, तो सीधा एरर फेंक देगा! कोई सिनेमैटिक बैकअप नहीं।
+    # अगर मॉडल खाली या गलत जवाब दे, तो सीधा एग्जैक्ट एरर (कोई डिफ़ॉल्ट वीडियो नहीं)
     if not final_keywords or not any(c.isalpha() for c in final_keywords):
         raise RuntimeError(f"Model '{model_name}' failed to generate valid keywords. Raw output was: '{raw_output}'")
         
@@ -206,12 +213,10 @@ if st.button("Generate Cinematic Video", disabled=audio_file is None):
             st.write(f"**Total Audio Duration:** {total_audio_duration:.2f} seconds")
 
             st.info("🎙️ Transcribing and analyzing scenes...")
-            chunks = transcribe_and_chunk(voice_path, whisper_size, target_length=10.0)
+            # 10-10 सेकंड की एकदम सटीक स्लाइसिंग
+            chunks = transcribe_and_chunk(voice_path, whisper_size, total_audio_duration, target_length=10.0)
             
-            if chunks:
-                chunks[-1]['duration'] = total_audio_duration - chunks[-1]['start']
-
-            st.success(f"✅ Voiceover split into {len(chunks)} cinematic scenes!")
+            st.success(f"✅ Voiceover split strictly into {len(chunks)} cinematic scenes (10s each)!")
 
             scene_files = []
             
@@ -219,11 +224,9 @@ if st.button("Generate Cinematic Video", disabled=audio_file is None):
                 st.write(f"---")
                 st.write(f"**Scene {i+1} ({chunk['duration']:.1f}s):** {chunk['text']}")
                 
-                # सीधा आपके पसंदीदा मॉडल को कॉल करेगा
                 query = get_groq_keywords(chunk['text'])
                 st.write(f"**AI Search Query:** `{query}`")
                 
-                # सीधा पिक्साबे को कॉल करेगा (नहीं मिला तो क्रैश होगा)
                 media_info = fetch_pixabay_media(query, "vertical" if width < height else "horizontal")
                 
                 media_file = os.path.join(tmp_dir, f"media_{i}" + (".mp4" if media_info["type"] == "video" else ".jpg"))
