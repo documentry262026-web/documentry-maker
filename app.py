@@ -48,16 +48,18 @@ def get_exact_duration(path):
         return float(h) * 3600 + float(m) * 60 + float(s)
     return 10.0
 
-# 🌟 BUG FIXED: यहाँ वापस language="hi" और initial_prompt लगा दिया है!
 def transcribe_and_chunk(path, size, target_length=10.0):
     model = WhisperModel(size, device="cpu", compute_type="int8")
     
+    # 🌟 HALLUCINATION FIX: condition_on_previous_text=False 
+    # यह Whisper को अजीब भाषाएं और 30 सेकंड का कचरा बनाने से रोकेगा!
     segments, _ = model.transcribe(
         path, 
-        language="hi", # सिर्फ हिंदी
+        language="hi", 
         task="transcribe", 
         beam_size=5,
-        initial_prompt="यह शुद्ध हिंदी भाषा है। इसे देवनागरी लिपि में ही लिखें।" # उर्दू को रोकने का पक्का इलाज
+        condition_on_previous_text=False, 
+        initial_prompt="हिंदी" 
     )
     
     seg_list = list(segments)
@@ -105,13 +107,14 @@ def get_groq_keywords(transcript):
 
     client = Groq(api_key=GK[0])
     
+    # 🌟 GROQ DECOMMISSION FIX: 100% Active and Working Models
     models_to_try = [
-        "openai/gpt-oss-20b",     # आपका पसंदीदा मॉडल सबसे पहले
-        "llama3-8b-8192",         
-        "gemma2-9b-it"      
+        "openai/gpt-oss-20b",        # आपका फेवरेट 
+        "llama-3.3-70b-versatile",   # नया और सबसे पावरफुल
+        "llama-3.1-8b-instant",      # नया और सबसे फास्ट
+        "mixtral-8x7b-32768"         # एवरग्रीन बैकअप
     ]
 
-    # आपका शानदार प्रॉम्प्ट
     prompt = f"""You are a professional stock-footage search keyword generator for a Hindi voiceover-to-video application.
 
 TASK:
@@ -141,7 +144,7 @@ Return ONLY the query."""
                 messages=[
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=15,
+                max_tokens=25,
                 temperature=0.1
             )
             
@@ -161,7 +164,7 @@ Return ONLY the query."""
         except Exception as e:
             st.warning(f"⚠️ `{model_name}` failed: {str(e)}. Switching to next model...")
 
-    raise RuntimeError("All Groq models failed. The API might be down or key is exhausted.")
+    raise RuntimeError("All Groq models failed. Please check if your API key has quota left.")
 
 def fetch_pixabay_media(query, orientation):
     if not PK:
