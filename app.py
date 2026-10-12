@@ -26,6 +26,7 @@ if 'video_ready' not in st.session_state:
 
 # --- GROQ API KEYS ---
 GROQ_KEYS = [
+    "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"
     "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",
     "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"
 ]
