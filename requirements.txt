@@ -2,5 +2,4 @@ streamlit
 faster-whisper
 google-genai
 requests
-moviepy==1.0.3
 groq
