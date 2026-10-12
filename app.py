@@ -3,6 +3,7 @@ import random
 import requests
 import subprocess
 import streamlit as st
+import numpy as np
 from google import genai
 from faster_whisper import WhisperModel
 from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
@@ -16,12 +17,24 @@ PIXABAY_API_KEY = "57871281-bac58345c5fba7b07f0655556"
 GEMINI_API_KEY = "AQ.Ab8RN6IVQYNwTLU-r1GGLqI8Jcf-eNva9G0WfwRy6mUcegUTMQ"
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# --- NEW: BYPASS 'av' ERROR USING DIRECT FFMPEG DECODING ---
+def load_audio_direct(file_path):
+    cmd = [
+        "ffmpeg", "-i", file_path,
+        "-f", "s16le", "-ac", "1", "-ar", "16000", "-"
+    ]
+    out = subprocess.run(cmd, capture_output=True, check=True).stdout
+    return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
+
 def analyze_audio(audio_path, progress_bar, status_text):
     status_text.text("🎙️ AI फाइल सुन रहा है और शुद्ध हिंदी लिख रहा है...")
     progress_bar.progress(10)
     
+    # Bypass Error: AI को डायरेक्ट numpy array भेजा जा रहा है
+    audio_array = load_audio_direct(audio_path)
+    
     whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
-    segments, info = whisper_model.transcribe(audio_path, word_timestamps=True, language="hi")
+    segments, info = whisper_model.transcribe(audio_array, word_timestamps=True, language="hi")
     
     words_data, scenes, current_scene_words = [], [], []
     scene_start = 0.0
@@ -96,11 +109,9 @@ st.set_page_config(page_title="AI Documentary Maker", page_icon="🎬", layout="
 st.title("🎬 Pure Docu-Studio AI (Pro)")
 st.write("Upload your Audio or Video file, and let AI build a cinematic documentary!")
 
-# अब फाइल टाइप में कुछ भी अपलोड हो सकता है (MP3, MP4, WAV, M4A)
 uploaded_file = st.file_uploader("यहाँ अपनी फाइल अपलोड करें (Max: 500MB)", type=["mp3", "wav", "mp4", "m4a", "aac", "mov", "avi"])
 
 if uploaded_file and st.button("🔥 Generate Documentary Video"):
-    # ओरिजिनल फाइल एक्सटेंशन सेव करेगा
     file_ext = uploaded_file.name.split('.')[-1]
     temp_input_file = f"temp_input.{file_ext}"
     
@@ -129,7 +140,6 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
             
         status_text.text("🎞️ विजुअल्स, फेट्स, और ऑडियो को जोड़ा जा रहा है...")
         final_video = concatenate_videoclips(video_clips, method="compose")
-        # AudioFileClip वीडियो में से अपने आप ऑडियो निकाल लेगा
         final_video = final_video.set_audio(AudioFileClip(temp_input_file))
         
         temp_out = "temp_render.mp4"
