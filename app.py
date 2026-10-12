@@ -1,6 +1,5 @@
 import os
 import re
-import json
 import tempfile
 import subprocess
 from pathlib import Path
@@ -36,23 +35,29 @@ def show_error(title, e):
 def ffmpeg():
     return imageio_ffmpeg.get_ffmpeg_exe()
 
-def run(cmd, timeout=300):
+def run(cmd, timeout=400):
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return res
 
+# फाइल की असली (Exact) लंबाई निकालने का सबसे तगड़ा तरीका
+def get_exact_duration(path):
+    exe = ffmpeg()
+    result = subprocess.run([exe, "-i", path], capture_output=True, text=True)
+    # FFmpeg फाइल की डिटेल्स stderr में देता है
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", result.stderr)
+    if match:
+        h, m, s = match.groups()
+        total_seconds = float(h) * 3600 + float(m) * 60 + float(s)
+        return total_seconds
+    return 10.0 # अगर कोई बहुत ही अजीब फाइल हो तो ही यह चलेगा
+
 def transcribe_audio(path, size):
     model = WhisperModel(size, device="cpu", compute_type="int8")
-    segments, info = model.transcribe(path, task="transcribe", beam_size=5)
-    full_text = " ".join([seg.text.strip() for seg in segments])
+    segments, _ = model.transcribe(path, task="transcribe", beam_size=5)
     
-    # Calculate exact total duration from segments
-    duration = 0.0
-    for seg in segments:
-        if seg.end > duration:
-            duration = seg.end
-    if duration <= 0:
-        duration = 10.0 # Fallback
-    return full_text, duration
+    seg_list = list(segments)
+    full_text = " ".join([seg.text.strip() for seg in seg_list])
+    return full_text
 
 def get_groq_keywords(transcript):
     if not GK:
@@ -63,6 +68,7 @@ def get_groq_keywords(transcript):
         "based on the following transcript. Keep it concise, separated by commas, with no extra text or quotes.\n\n"
         f"Transcript: {transcript}"
     )
+    # आपका वर्किंग मॉडल यहाँ लगा दिया है
     r = client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
@@ -76,7 +82,7 @@ def fetch_pixabay_media(query, orientation):
     if not PK:
         raise RuntimeError("PIXABAY_API_KEY missing from Secrets")
     
-    # Try fetching Video first
+    # 1. पहले वीडियो ढूँढेंगे
     try:
         r = requests.get(PIXABAY_VIDEO_API, params={
             "key": PK, "q": query, "video_type": "film",
@@ -92,7 +98,7 @@ def fetch_pixabay_media(query, orientation):
     except Exception:
         pass
 
-    # Fallback to Image if video is not available
+    # 2. अगर वीडियो नहीं मिला, तो फोटो ढूँढेंगे
     try:
         r = requests.get(PIXABAY_IMAGE_API, params={
             "key": PK, "q": query, "image_type": "photo",
@@ -109,7 +115,7 @@ def fetch_pixabay_media(query, orientation):
 
     raise RuntimeError("No media found on Pixabay for the given query.")
 
-# UI Components
+# ================= UI Components ================= #
 st.header("1. Upload Voiceover")
 audio_file = st.file_uploader(
     "Upload audio or video file (MP3, WAV, MP4, AAC, etc.)",
@@ -124,19 +130,21 @@ custom_keyword = st.text_input("Custom Visual Keywords (Optional - leave blank t
 
 st.header("3. Generate Final Video")
 if st.button("Generate Video", disabled=audio_file is None):
-    # Use a secure temporary directory and ensure automatic cleanup to prevent storage full errors
+    # Temporary डायरेक्टरी ताकि 1GB स्टोरेज फुल न हो
     with tempfile.TemporaryDirectory() as tmp_dir:
         try:
-            # Save uploaded file
             ext = Path(audio_file.name).suffix or ".mp3"
             voice_path = os.path.join(tmp_dir, f"voice{ext}")
             Path(voice_path).write_bytes(audio_file.getvalue())
 
-            st.info("🎙️ Transcribing voiceover via Whisper...")
-            transcript, duration = transcribe_audio(voice_path, whisper_size)
-            st.write(f"**Detected Duration:** {duration:.2f} seconds")
+            # फाइल की असली लंबाई (Duration) निकालना
+            duration = get_exact_duration(voice_path)
+            st.write(f"**Exact Audio Duration:** {duration:.2f} seconds")
 
-            st.info("🤖 Extracting smart visual keywords via Groq...")
+            st.info("🎙️ Transcribing voiceover via Whisper...")
+            transcript = transcribe_audio(voice_path, whisper_size)
+
+            st.info("🤖 Extracting smart visual keywords via Groq (openai/gpt-oss-20b)...")
             search_query = custom_keyword.strip() if custom_keyword.strip() else get_groq_keywords(transcript)
             st.write(f"**Search Query:** `{search_query}`")
 
@@ -152,8 +160,7 @@ if st.button("Generate Video", disabled=audio_file is None):
             final_path = os.path.join(tmp_dir, "final_output.mp4")
             exe = ffmpeg()
 
-            # Build efficient FFmpeg filter graph for Zoom-in/Zoom-out & Fades
-            # Safe zoompan/scale animation with audio/video crossfade
+            # Fade In / Fade Out का कैलकुलेशन
             fade_duration = min(1.0, duration / 4)
             out_fade_start = max(0, duration - fade_duration)
 
@@ -175,7 +182,7 @@ if st.button("Generate Video", disabled=audio_file is None):
                     "-shortest", "-movflags", "+faststart", final_path
                 ]
             else:
-                # For static image: apply smooth zoompan (ken burns motion effect) + fade
+                # फोटो के लिए Zoom In/Out (Motion Graphics)
                 zoom_filter = (
                     f"scale=8000:-1,"
                     f"zoompan=z='min(zoom+0.001,1.25)':d={int(duration*30)}:s={width}x{height}:fps=30,"
@@ -193,7 +200,7 @@ if st.button("Generate Video", disabled=audio_file is None):
                     "-shortest", "-movflags", "+faststart", final_path
                 ]
 
-            result = run(cmd, timeout=400)
+            result = run(cmd, timeout=600)
             if result.returncode != 0:
                 raise RuntimeError(f"FFmpeg render failed:\n{result.stderr[-2000:]}")
 
@@ -206,11 +213,9 @@ if st.button("Generate Video", disabled=audio_file is None):
             st.download_button(
                 "📥 Download Final Video",
                 final_bytes,
-                file_name="ai_voiceover_short.mp4",
+                file_name="ai_voiceover_final.mp4",
                 mime="video/mp4"
             )
 
         except Exception as e:
             show_error("Video Generation Failed", e)
-
-st.caption("💡 Tip: Make sure your `GROQ_KEYS` and `PIXABAY_API_KEY` are added in your Streamlit Cloud Secrets.")
