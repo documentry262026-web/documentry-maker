@@ -19,12 +19,12 @@ if not hasattr(PIL.Image, 'ANTIALIAS'):
 # --- FFMPEG BYPASS ---
 FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
 
-# --- STREAMLIT MEMORY (SESSION STATE) ---
+# --- STREAMLIT MEMORY ---
 if 'video_ready' not in st.session_state:
     st.session_state.video_ready = False
     st.session_state.video_path = None
 
-# --- GROQ API KEYS (Superfast) ---
+# --- GROQ API KEYS ---
 GROQ_KEYS = [
     "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",
     "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"
@@ -48,7 +48,6 @@ GEMINI_MODELS = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-flash']
 
 PIXABAY_API_KEY = "57871281-bac58345c5fba7b07f0655556"
 
-# --- SYSTEM CLEANUP ---
 def cleanup_temp_files():
     print("🧹 Cleaning up Temp files...")
     files_to_delete = glob.glob("temp_*") + glob.glob("processed_scene_*.mp4") + ["captions.ass", "concat_list.txt"]
@@ -64,9 +63,8 @@ def load_audio_direct(file_path):
     out = subprocess.run(cmd, capture_output=True, check=True).stdout
     return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
-# --- AUDIO ANALYSIS ---
 def analyze_audio(audio_path, progress_bar, status_text):
-    status_text.text("🎙️ AI फाइल सुन रहा है और शुद्ध हिंदी समझ रहा है...")
+    status_text.text("🎙️ AI ऑडियो सुन रहा है और सही सीन्स बना रहा है...")
     progress_bar.progress(10)
     
     audio_array = load_audio_direct(audio_path)
@@ -80,7 +78,7 @@ def analyze_audio(audio_path, progress_bar, status_text):
         for word in segment.words:
             words_data.append(word)
             current_scene_words.append(word.word)
-            if word.end - scene_start >= 7.0:
+            if word.end - scene_start >= 6.0: # Har 6 second ka ek scene
                 scenes.append({"start": scene_start, "end": word.end, "text": " ".join(current_scene_words)})
                 scene_start = word.end
                 current_scene_words = []
@@ -88,72 +86,68 @@ def analyze_audio(audio_path, progress_bar, status_text):
         scenes.append({"start": scene_start, "end": words_data[-1].end, "text": " ".join(current_scene_words)})
     return words_data, scenes
 
-# --- HYBRID AI ENGINE ---
+# --- STRICT AI ENGINE (NO FAKE FALLBACKS) ---
 def get_ai_keyword(scene_text, status_text):
-    prompt = f"Based on this Hindi text: '{scene_text}', give me exactly ONE short english search phrase (max 2 words) to find documentary B-roll footage. Only return the words, no symbols."
+    prompt = f"Based on this exact Hindi text snippet: '{scene_text}', give me strictly ONE or TWO English words representing a visual B-roll search query for Pixabay. Return ONLY the words, nothing else."
     
-    for attempt in range(2): 
-        for idx, api_key in enumerate(GROQ_KEYS):
-            try:
-                client = Groq(api_key=api_key)
-                for model_name in GROQ_MODELS:
-                    try:
-                        chat_completion = client.chat.completions.create(
-                            messages=[{"role": "user", "content": prompt}],
-                            model=model_name,
-                            temperature=0.5,
-                            max_tokens=10
-                        )
-                        return chat_completion.choices[0].message.content.strip().replace('"', '')
-                    except Exception as e:
-                        if "429" in str(e).lower() or "rate" in str(e).lower():
-                            time.sleep(3)
-                        continue
-            except Exception:
-                continue
-                
-    status_text.text("🔄 Groq busy... Using Gemini Backup Engine...")
-    
-    for attempt in range(2): 
-        for idx, api_key in enumerate(GEMINI_KEYS):
-            try:
-                client = genai.Client(api_key=api_key)
-                for model_name in GEMINI_MODELS:
-                    try:
-                        response = client.models.generate_content(model=model_name, contents=prompt)
-                        if response and response.text:
-                            return response.text.strip().replace('"', '')
-                    except Exception as e:
-                        if "429" in str(e).lower():
-                            time.sleep(3)
-                        continue
-            except Exception:
-                continue
-
-    return "cinematic landscape"
+    # Try Groq
+    for api_key in GROQ_KEYS:
+        try:
+            client = Groq(api_key=api_key)
+            for model_name in GROQ_MODELS:
+                try:
+                    chat_completion = client.chat.completions.create(
+                        messages=[{"role": "user", "content": prompt}],
+                        model=model_name,
+                        temperature=0.3,
+                        max_tokens=8
+                    )
+                    kw = chat_completion.choices[0].message.content.strip().replace('"', '')
+                    if kw: return kw
+                except Exception:
+                    continue
+        except Exception:
+            continue
+            
+    # Try Gemini Backup
+    for api_key in GEMINI_KEYS:
+        try:
+            client = genai.Client(api_key=api_key)
+            for model_name in GEMINI_MODELS:
+                try:
+                    response = client.models.generate_content(model=model_name, contents=prompt)
+                    if response and response.text:
+                        kw = response.text.strip().replace('"', '')
+                        if kw: return kw
+                except Exception:
+                    continue
+        except Exception:
+            continue
+            
+    raise Exception("AI Keyword generation failed. Please check your API keys.")
 
 def get_video_for_scene(scene_text, orientation, status_text):
     keyword = get_ai_keyword(scene_text, status_text)
+    status_text.text(f"🔍 Searching Pixabay for: '{keyword}'...")
+    
     url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={keyword}&video_type=film&orientation={orientation}&safesearch=true&order=popular"
     
-    try:
-        res = requests.get(url, timeout=10).json() 
-        if not res.get('hits'):
-            fallback_url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={keyword}&video_type=film&safesearch=true&order=popular"
-            res = requests.get(fallback_url, timeout=10).json()
+    res = requests.get(url, timeout=10).json() 
+    if not res.get('hits'):
+        # Fallback query without orientation filter if strict orientation fails
+        fallback_url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={keyword}&video_type=film&safesearch=true&order=popular"
+        res = requests.get(fallback_url, timeout=10).json()
 
-        if res.get('hits'):
-            video_url = res['hits'][0]['videos']['medium']['url']
-            vid_res = requests.get(video_url, timeout=20) 
-            filename = f"temp_{keyword.replace(' ', '_')}.mp4"
-            with open(filename, 'wb') as f:
-                f.write(vid_res.content)
-            return filename
-    except Exception:
-        return None
-    return None
+    if res.get('hits'):
+        video_url = res['hits'][0]['videos']['medium']['url']
+        vid_res = requests.get(video_url, timeout=20) 
+        filename = f"temp_{abs(hash(keyword))}.mp4"
+        with open(filename, 'wb') as f:
+            f.write(vid_res.content)
+        return filename
+    else:
+        raise Exception(f"Pixabay par '{keyword}' ke liye koi video nahi mili!")
 
-# --- SMART SUBTITLES ---
 def generate_ass_subtitles(words_data, target_w, target_h, output_file="captions.ass"):
     font_size = 65 if target_w == 1920 else 55
     margin_v = 120 if target_h == 1080 else 250 
@@ -182,18 +176,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(ass_content)
 
-# --- STREAMLIT WEB GUI ---
+# --- WEB GUI ---
 st.set_page_config(page_title="AI Documentary Maker", page_icon="🎬", layout="centered")
-st.title("🎬 Pure Docu-Studio AI (Final Engine)")
-st.write("100% Crash-Proof! Powered by Groq, Gemini & RAM-Optimized FFmpeg.")
+st.title("🎬 Pure Docu-Studio AI (Strict & Clean)")
+st.write("100% Matching Visuals & Burned Subtitles - No Fake Fallbacks.")
 
 ratio_choice = st.radio("🎥 वीडियो का साइज़ चुनें:", ["16:9 (YouTube Standard)", "9:16 (Shorts / Reels)"], index=0)
 target_w, target_h = (1920, 1080) if "16:9" in ratio_choice else (1080, 1920)
 orientation = "horizontal" if "16:9" in ratio_choice else "vertical"
 
-uploaded_file = st.file_uploader("यहाँ अपनी फाइल अपलोड करें (Max: 500MB)", type=["mp3", "wav", "mp4", "m4a", "aac", "mov", "avi"])
+uploaded_file = st.file_uploader("यहाँ अपनी ऑडियो फाइल अपलोड करें (Max: 500MB)", type=["mp3", "wav", "mp4", "m4a", "aac", "mov", "avi"])
 
-if uploaded_file and st.button("🔥 Generate Documentary Video"):
+if uploaded_file and st.button("🔥 Generate Strict Documentary"):
     st.session_state.video_ready = False 
     
     file_ext = uploaded_file.name.split('.')[-1]
@@ -210,46 +204,41 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
         words_data, scenes = analyze_audio(temp_input_file, progress_bar, status_text)
         
         for i, scene in enumerate(scenes):
-            status_text.text(f"🎬 Scene {i+1}/{len(scenes)} प्रोसेस हो रहा है...")
+            status_text.text(f"🎬 Scene {i+1}/{len(scenes)}: Script text -> '{scene['text'][:30]}...'")
             
             duration = scene['end'] - scene['start']
             vid_path = get_video_for_scene(scene['text'], orientation, status_text)
             out_path = f"processed_scene_{i}.mp4"
-            fade_filter = ",fade=t=in:st=0:d=0.5" if i > 0 else ""
+            fade_filter = ",fade=t=in:st=0:d=0.3" if i > 0 else ""
             
-            if vid_path:
+            if vid_path and os.path.exists(vid_path):
                 cmd = f'"{FFMPEG_EXE}" -y -stream_loop -1 -i "{vid_path}" -t {duration} -vf "scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h},setsar=1{fade_filter}" -r 24 -c:v libx264 -preset ultrafast -threads 2 -an "{out_path}"'
-                subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                cmd = f'"{FFMPEG_EXE}" -y -f lavfi -i color=c=black:s={target_w}x{target_h}:r=24 -t {duration} -vf "setsar=1{fade_filter}" -c:v libx264 -preset ultrafast -threads 2 -an "{out_path}"'
                 subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
             processed_files_list.append(out_path)
             progress_bar.progress(10 + int((i+1)/len(scenes) * 40))
             
-        status_text.text("🎞️ सारी क्लिप्स को जोड़ा जा रहा है...")
+        status_text.text("🎞️ सीन्स को जोड़ा जा रहा है...")
         with open("concat_list.txt", "w") as f:
             for pf in processed_files_list:
                 f.write(f"file '{pf}'\n")
         
-        status_text.text("📝 कैप्शंस (Yellow Highlight) वीडियो पर जलाए जा रहे हैं (RAM Bypass Active)...")
+        status_text.text("📝 कैप्शंस (Yellow Highlight) वीडियो पर जलाए जा रहे हैं...")
         generate_ass_subtitles(words_data, target_w, target_h)
         
         final_output = "FINAL_DOCUMENTARY.mp4"
         
-        # --- THE MASTER RAM BYPASS COMMAND (-preset ultrafast, -threads 2) ---
+        # FFmpeg Subtitle Burn Command
         cmd = f'"{FFMPEG_EXE}" -y -f concat -safe 0 -i concat_list.txt -i "{temp_input_file}" -vf "ass=captions.ass" -c:v libx264 -preset ultrafast -crf 28 -threads 2 -c:a aac -shortest "{final_output}"'
         subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         if os.path.exists(final_output):
             progress_bar.progress(100)
-            status_text.success("✅ वीडियो सफलतापूर्वक बन गई है!")
-            
-            # RAM me store nahi karenge, bas File ka raasta yaad rakhenge
+            status_text.success("✅ डॉक्यूमेंट्री बिल्कुल सही तरीके से तैयार है!")
             st.session_state.video_path = final_output
             st.session_state.video_ready = True
         else:
-            raise Exception("FFmpeg Rendering Error! Sayad captions properly render nahi hue.")
+            raise Exception("FFmpeg final rendering failed.")
             
     except Exception as e:
         st.error(f"Error: {str(e)}")
@@ -257,14 +246,10 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
     finally:
         cleanup_temp_files()
 
-# --- DISPLAY VIDEO & DOWNLOAD BUTTON (0% Memory Loaded) ---
 if st.session_state.video_ready and st.session_state.video_path and os.path.exists(st.session_state.video_path):
     st.markdown("### 🎬 तुम्हारी फाइनल डॉक्यूमेंट्री:")
-    
-    # Direct Hard-Disk se play karega
     st.video(st.session_state.video_path)
     
-    # Direct Hard-Disk se download hoga
     with open(st.session_state.video_path, "rb") as file:
         st.download_button(
             label="⬇️ Download Final Video", 
