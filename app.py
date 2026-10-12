@@ -56,7 +56,7 @@ def transcribe_audio(path, size):
     full_text = " ".join([seg.text.strip() for seg in seg_list])
     return full_text
 
-# स्मार्ट कीवर्ड एक्सट्रैक्टर - जो मॉडल की फालतू बातों को इग्नोर करेगा
+# सुपर स्मार्ट कीवर्ड एक्सट्रैक्टर (3 Retry System के साथ)
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
@@ -66,32 +66,44 @@ def get_groq_keywords(transcript):
 
     client = Groq(api_key=GK[0])
     prompt = (
-        "You are a strict keyword extractor. Read the following transcript and output EXACTLY 2 or 3 visual keywords "
-        "that represent the core subject. DO NOT write full sentences. DO NOT say 'Here are the keywords'.\n\n"
+        "The following transcript is translated from spoken Hindi/English. Understand the context and provide "
+        "EXACTLY 2 or 3 visual search keywords in English for fetching a relevant stock video. "
+        "Only output the keywords, no extra text, no sentences.\n\n"
         f"Transcript: {transcript}"
     )
     
-    r = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=40,
-        temperature=0.2
-    )
+    last_raw_output = ""
     
-    raw_output = r.choices[0].message.content.strip()
-    
-    # मॉडल की फालतू बातें (जैसे "The keywords are:", "1.", "-") को साफ करना
-    clean_text = re.sub(r"(?i)^(here|are|the|keywords|visual|search|:|-|\*|\n|\d+\.)+", " ", raw_output)
-    clean_text = re.sub(r"[^\w\s]", " ", clean_text) # सारे स्पेशल कैरेक्टर्स हटाना
-    
-    # 2 से बड़े शब्दों को छांटना (a, an, the इग्नोर करना)
-    words = [w for w in clean_text.split() if len(w) > 2]
-    final_keywords = " ".join(words[:3]) # सिर्फ टॉप 3 शब्द लेना
-    
-    if not final_keywords:
-        raise RuntimeError(f"Groq AI Error: Could not extract keywords. AI returned: '{raw_output}'")
-        
-    return final_keywords
+    # अगर मॉडल खाली जवाब देता है, तो 3 बार ट्राई करेगा
+    for attempt in range(3):
+        try:
+            r = client.chat.completions.create(
+                model="openai/gpt-oss-20b",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=40,
+                temperature=0.2 + (attempt * 0.1) # हर कोशिश में थोड़ा टेंपरेचर बढ़ाएंगे ताकि अलग जवाब दे
+            )
+            
+            raw_output = r.choices[0].message.content or ""
+            raw_output = raw_output.strip()
+            last_raw_output = raw_output
+            
+            if raw_output:
+                # मॉडल की फालतू बातें साफ़ करना
+                clean_text = re.sub(r"(?i)^(here|are|the|keywords|visual|search|:|-|\*|\n|\d+\.)+", " ", raw_output)
+                clean_text = re.sub(r"[^\w\s]", " ", clean_text)
+                
+                # 2 अक्षरों से बड़े शब्द छांटना
+                words = [w for w in clean_text.split() if len(w) > 2]
+                final_keywords = " ".join(words[:3]) 
+                
+                if final_keywords:
+                    return final_keywords
+        except Exception as e:
+            last_raw_output = str(e)
+            
+    # 3 बार कोशिश करने के बाद भी फेल हो, तभी एरर देगा
+    raise RuntimeError(f"Groq AI Error: Model repeatedly failed to extract keywords after 3 attempts. Last AI response: '{last_raw_output}'")
 
 def fetch_pixabay_media(query, orientation):
     if not PK:
@@ -126,7 +138,7 @@ def fetch_pixabay_media(query, orientation):
     except Exception:
         pass
 
-    raise RuntimeError(f"Pixabay Error: No video or image found on Pixabay for the strict keywords: '{query}'.")
+    raise RuntimeError(f"Pixabay Error: No video or image found on Pixabay for the keywords: '{query}'.")
 
 # ================= UI Components ================= #
 st.header("1. Upload Voiceover")
