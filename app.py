@@ -56,23 +56,17 @@ def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
         path, 
         language="hi", 
         task="transcribe", 
-        beam_size=1,  
-        temperature=0.0,
-        vad_filter=True, 
-        vad_parameters=dict(min_silence_duration_ms=500),
+        beam_size=5,
+        vad_filter=True,
         condition_on_previous_text=False
     )
     
     seg_list = list(segments)
     chunks = []
-    
-    full_clean_text = ""
-    for seg in seg_list:
-        clean = re.sub(r'[^a-zA-Z\u0900-\u097F\s]', ' ', seg.text.strip())
-        full_clean_text += " " + clean
-    full_clean_text = re.sub(r'\s+', ' ', full_clean_text).strip()
-    
     num_chunks = math.ceil(total_audio_duration / target_length)
+    
+    # 🌟 NO BULLSHIT FILTER: सीधे असली टेक्स्ट को प्रोसेस करेगा
+    last_valid_text = ""
     
     for i in range(num_chunks):
         start_time = i * target_length
@@ -84,18 +78,22 @@ def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
             
         chunk_text = ""
         for seg in seg_list:
+            # अगर इस 10 सेकंड के हिस्से में कोई आवाज़ है, तो उसे जोड़ लो
             if seg.start < end_time and seg.end > start_time:
-                clean_seg_text = re.sub(r'[^a-zA-Z\u0900-\u097F\s]', ' ', seg.text.strip())
-                clean_seg_text = re.sub(r'\s+', ' ', clean_seg_text).strip()
-                if clean_seg_text:
-                    chunk_text += " " + clean_seg_text
+                chunk_text += " " + seg.text.strip()
                 
         chunk_text = chunk_text.strip()
         
-        if not chunk_text and chunks:
-            chunk_text = chunks[-1]["text"]
-        elif not chunk_text and not chunks:
-            chunk_text = full_clean_text if full_clean_text else "beautiful nature landscape"
+        # अगर 10 सेकंड तक कोई आवाज़ नहीं है, तो कहानी को बनाए रखने के लिए पिछले सीन का टेक्स्ट ले लेगा
+        if not chunk_text:
+            if last_valid_text:
+                chunk_text = last_valid_text
+            else:
+                # अगर ऑडियो की शुरुआत ही खाली है, तो पूरी ऑडियो का जो भी टेक्स्ट है वो ले लेगा
+                full_text = " ".join([s.text.strip() for s in seg_list]).strip()
+                chunk_text = full_text
+        else:
+            last_valid_text = chunk_text
             
         chunks.append({
             "text": chunk_text,
@@ -106,43 +104,41 @@ def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
                 
     return chunks
 
-# 🚀 GROQ FIX: High max_tokens + Smart Extraction
+# 🚀 100% NO-BACKUP KEYWORDS (सिर्फ आपका मॉडल, सिर्फ आपकी कमांड)
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
 
+    if not transcript:
+        raise RuntimeError("Transcript is totally empty. No words detected by Whisper.")
+
     client = Groq(api_key=GK[0])
     model_name = "openai/gpt-oss-20b" 
 
-    # प्रॉम्प्ट को ऐसा बनाया है कि मॉडल रिलैक्स होकर जवाब दे, क्रैश न हो।
+    # एकदम सिंपल प्रॉम्प्ट, बिना किसी कड़े नियम के (ताकि क्रैश न हो)
     prompt = (
-        "Analyze the following Hindi or Hinglish text and suggest exactly 3 English keywords for finding a relevant stock video. "
-        "Format your response as just the keywords separated by spaces.\n\n"
+        "Give me exactly 3 English visual search keywords for this text. "
+        "Only output the keywords, no sentences.\n\n"
         f"Text: {transcript}"
     )
 
     r = client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=500, # 🌟 THE REAL FIX: 30-40 रखने से gpt-oss-20b क्रैश होकर खाली स्ट्रिंग दे रहा था!
+        max_tokens=200, 
         temperature=0.2
     )
     
     raw_output = r.choices[0].message.content or ""
     raw_output = raw_output.strip()
     
-    if not raw_output:
-        raise RuntimeError(f"Model '{model_name}' failed to generate keywords. Raw output was completely empty.")
-        
-    # अगर मॉडल ने लंबी बात लिख दी (जैसे "The keywords are: city traffic cars"), तो हम फालतू शब्द हटा देंगे
-    clean_text = re.sub(r'(?i)^(here|are|the|keywords|visual|search|is|:|-|\*|\n|\d+\.)+', ' ', raw_output)
-    clean_text = re.sub(r'[^a-zA-Z\s]', ' ', clean_text)
+    clean_text = re.sub(r'[^a-zA-Z\s]', ' ', raw_output)
+    words = [w for w in clean_text.split() if len(w) > 1]
+    final_keywords = " ".join(words[-4:]) 
     
-    words = [w for w in clean_text.split() if len(w) > 2] # 2 से बड़े शब्द ही रखेंगे
-    final_keywords = " ".join(words[-3:]) # अगर उसने लंबी लाइन लिखी है, तो आखिरी 3-4 शब्द ही काम के होते हैं
-    
+    # ❌ NO BACKUP: अगर खाली मिला, तो सीधा ऐप को रोकेगा और एरर देगा
     if not final_keywords:
-        raise RuntimeError(f"Model '{model_name}' output could not be parsed. Raw output was: '{raw_output}'")
+        raise RuntimeError(f"Model '{model_name}' gave empty or invalid keywords. Raw output was: '{raw_output}'")
         
     return final_keywords
 
