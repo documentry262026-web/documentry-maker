@@ -9,13 +9,21 @@ import requests
 from google import genai
 from groq import Groq
 from faster_whisper import WhisperModel
+import imageio_ffmpeg  # NAYA VIP PACKAGE
+
+# --- MAGIC FIX FOR PILLOW ANTIALIAS ERROR ---
+import PIL.Image
+if not hasattr(PIL.Image, 'ANTIALIAS'):
+    PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
+
+# --- FFMPEG BYPASS (No need for packages.txt) ---
+FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
 
 # --- GROQ API KEYS (Superfast) ---
 GROQ_KEYS = [
     "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",
     "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"
 ]
-# Asli Groq Models jo 100x fast chalenge
 GROQ_MODELS = ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768']
 
 # --- GEMINI BACKUP KEYS ---
@@ -47,7 +55,8 @@ def cleanup_temp_files():
             pass
 
 def load_audio_direct(file_path):
-    cmd = ["ffmpeg", "-i", file_path, "-f", "s16le", "-ac", "1", "-ar", "16000", "-"]
+    # FFMPEG_EXE use kar rahe hain direct
+    cmd = [FFMPEG_EXE, "-i", file_path, "-f", "s16le", "-ac", "1", "-ar", "16000", "-"]
     out = subprocess.run(cmd, capture_output=True, check=True).stdout
     return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
@@ -119,7 +128,7 @@ def get_ai_keyword(scene_text, status_text):
             except Exception:
                 continue
 
-    return "cinematic landscape" # Ultimate Crash Preventer
+    return "cinematic landscape"
 
 def get_video_for_scene(scene_text, orientation, status_text):
     keyword = get_ai_keyword(scene_text, status_text)
@@ -173,8 +182,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
 
 # --- STREAMLIT WEB GUI ---
 st.set_page_config(page_title="AI Documentary Maker", page_icon="🎬", layout="centered")
-st.title("🎬 Pure Docu-Studio AI (RAM Free Edition)")
-st.write("100% Crash-Proof! Powered by Groq, Gemini & FFmpeg Hardware Engine.")
+st.title("🎬 Pure Docu-Studio AI (Zero RAM Edition)")
+st.write("100% Crash-Proof! Powered by Groq, Gemini & Built-in FFmpeg.")
 
 ratio_choice = st.radio("🎥 वीडियो का साइज़ चुनें:", ["16:9 (YouTube Standard)", "9:16 (Shorts / Reels)"], index=0)
 target_w, target_h = (1920, 1080) if "16:9" in ratio_choice else (1080, 1920)
@@ -204,14 +213,12 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
             out_path = f"processed_scene_{i}.mp4"
             fade_filter = ",fade=t=in:st=0:d=0.5" if i > 0 else ""
             
-            # --- PURE FFMPEG ENGINE (ZERO RAM CRASHES) ---
+            # --- PURE FFMPEG ENGINE (Bypass Streamlit limits) ---
             if vid_path:
-                # Video Resize, Crop, and Loop without Python Memory
-                cmd = f'ffmpeg -y -stream_loop -1 -i "{vid_path}" -t {duration} -vf "scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h},setsar=1{fade_filter}" -r 24 -c:v libx264 -preset superfast -an "{out_path}"'
+                cmd = f'"{FFMPEG_EXE}" -y -stream_loop -1 -i "{vid_path}" -t {duration} -vf "scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h},setsar=1{fade_filter}" -r 24 -c:v libx264 -preset superfast -an "{out_path}"'
                 subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
-                # Black Screen Fallback Engine
-                cmd = f'ffmpeg -y -f lavfi -i color=c=black:s={target_w}x{target_h}:r=24 -t {duration} -vf "setsar=1{fade_filter}" -c:v libx264 -preset superfast -an "{out_path}"'
+                cmd = f'"{FFMPEG_EXE}" -y -f lavfi -i color=c=black:s={target_w}x{target_h}:r=24 -t {duration} -vf "setsar=1{fade_filter}" -c:v libx264 -preset superfast -an "{out_path}"'
                 subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
             processed_files_list.append(out_path)
@@ -226,7 +233,7 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
         generate_ass_subtitles(words_data, target_w, target_h)
         
         final_output = "FINAL_DOCUMENTARY.mp4"
-        cmd = f'ffmpeg -y -f concat -safe 0 -i concat_list.txt -i {temp_input_file} -vf "ass=captions.ass" -c:v libx264 -preset fast -c:a aac -shortest {final_output}'
+        cmd = f'"{FFMPEG_EXE}" -y -f concat -safe 0 -i concat_list.txt -i "{temp_input_file}" -vf "ass=captions.ass" -c:v libx264 -preset fast -c:a aac -shortest "{final_output}"'
         subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         progress_bar.progress(100)
