@@ -74,7 +74,7 @@ def get_groq_keywords(transcript):
     ]
 
     prompt = (
-        "Extract exactly 3 English words that describe the visual scene of this text. "
+        "Extract exactly 3 English words that describe the visual scene of this text.Give that thing n want dont give any extra words or somethng just ive me keywords okay for this script  "
         "Do not write sentences. Only output the 3 words.\n\n"
         f"Text: {transcript}"
     )
