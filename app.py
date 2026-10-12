@@ -1,4 +1,6 @@
 import os
+import glob
+import time
 import random
 import requests
 import subprocess
@@ -13,7 +15,7 @@ import PIL.Image
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
-# Tumhari API Keys ka Array
+# Tumhari API Keys
 GEMINI_KEYS = [
     "AQ.Ab8RN6IglBEm55inC7zLAOlN1HQ8Qr4JOCOQrbGwL-1vYpXSXQ",
     "AQ.Ab8RN6JPeFn--zNyZFTnQJzj9M8lMwl4PfX4R1Qt3SFKoQ4D_w",
@@ -21,13 +23,21 @@ GEMINI_KEYS = [
     "AQ.Ab8RN6KCsY2r4jW9nu8C8RbAY8k9vn7SMbNwzAayQBDQj1ahUA"
 ]
 
-# Tumhare strict instructions ke hisab se models
 TARGET_MODELS = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-flash']
+PIXABAY_API_KEY = "57871281-bac58345c5fba7b07f0655556"
 
-# Pixabay API[cite: 1]
-PIXABAY_API_KEY = "57871281-bac58345c5fba7b07f0655556" 
+# --- SMART AUTO-CLEANUP FUNCTION ---
+def cleanup_temp_files():
+    print("🧹 Cleaning up temporary files to save storage...")
+    files_to_delete = glob.glob("temp_*") + ["captions.ass"] 
+    for file_path in files_to_delete:
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception:
+            pass
 
-# --- FFMPEG DIRECT AUDIO DECODING (TO PREVENT AV PACKAGE CRASH) ---
+# --- FFMPEG DIRECT AUDIO DECODING ---
 def load_audio_direct(file_path):
     cmd = [
         "ffmpeg", "-i", file_path,
@@ -60,7 +70,7 @@ def analyze_audio(audio_path, progress_bar, status_text):
         scenes.append({"start": scene_start, "end": words_data[-1].end, "text": " ".join(current_scene_words)})
     return words_data, scenes
 
-# --- SMART MULTI-KEY & MULTI-MODEL FALLBACK ENGINE ---
+# --- SMART MULTI-KEY & RATE-LIMIT MANAGER ---
 def get_ai_keyword(scene_text):
     prompt = f"Based on this Hindi text: '{scene_text}', give me exactly ONE short english search phrase (max 2 words) to find documentary B-roll footage. Only return the words, no symbols."
     
@@ -72,17 +82,16 @@ def get_ai_keyword(scene_text):
                     response = client.models.generate_content(model=model_name, contents=prompt)
                     if response and response.text:
                         return response.text.strip().replace('"', '')
-                except Exception as e:
-                    continue # Ek model fail hua, agla try karo
-        except Exception as e:
-            continue # Ek key fail hui, agli try karo
+                except Exception:
+                    continue
+        except Exception:
+            continue
             
-    raise Exception("Saari Gemini API keys expire ho chuki hain ya limits cross kar chuki hain. Kripya nayi keys dalein.")
+    raise Exception("Saari Gemini API keys Rate-Limit ho chuki hain. Kripya 1 minute baad try karein.")
 
 # --- FETCH EXACT DOCUMENTARY VISUALS ---
 def get_video_for_scene(scene_text, duration):
     keyword = get_ai_keyword(scene_text)
-    print(f"Searching exactly for: {keyword}")
     
     url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={keyword}&video_type=film&orientation=horizontal&safesearch=true&order=popular"
     res = requests.get(url).json()
@@ -132,8 +141,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 # --- STREAMLIT WEB GUI ---
 st.set_page_config(page_title="AI Documentary Maker", page_icon="🎬", layout="centered")
-st.title("🎬 Pure Docu-Studio AI (Genuine Mode)")
-st.write("Upload your Audio or Video file, and AI will build a 100% relevant cinematic documentary!")
+st.title("🎬 Pure Docu-Studio AI (Pro Mode)")
+st.write("Upload your Audio/Video file, and AI will build a 100% cinematic documentary!")
 
 uploaded_file = st.file_uploader("यहाँ अपनी फाइल अपलोड करें (Max: 500MB)", type=["mp3", "wav", "mp4", "m4a", "aac", "mov", "avi"])
 
@@ -152,7 +161,11 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
         video_clips = []
         
         for i, scene in enumerate(scenes):
-            status_text.text(f"🎬 Scene {i+1}/{len(scenes)} के लिए exact क्लिप्स डाउनलोड हो रही हैं...")
+            status_text.text(f"🎬 Scene {i+1}/{len(scenes)} के लिए क्लिप्स डाउनलोड हो रही हैं... (Taking a 4-sec breather for API)")
+            
+            # --- MAGIC BRAKE (Rate Limit Bypass) ---
+            time.sleep(4) 
+            
             duration = scene['end'] - scene['start']
             vid_path = get_video_for_scene(scene['text'], duration)
             
@@ -188,3 +201,7 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
             
     except Exception as e:
         st.error(f"Error: {str(e)}")
+        
+    finally:
+        # Hamesha chalega aur extra temporary files delete karke server khali kar dega
+        cleanup_temp_files()
