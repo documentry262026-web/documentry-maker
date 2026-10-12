@@ -26,7 +26,6 @@ if 'video_ready' not in st.session_state:
 
 # --- GROQ API KEYS ---
 GROQ_KEYS = [
-    "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"
     "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",
     "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"
 ]
@@ -65,7 +64,7 @@ def load_audio_direct(file_path):
     return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
 def analyze_audio(audio_path, progress_bar, status_text):
-    status_text.text("🎙️ AI ऑडियो सुन रहा है और सही सीन्स बना रहा है...")
+    status_text.text("🎙️ AI audio sun raha hai aur sahi scenes bana raha hai...")
     progress_bar.progress(10)
     
     audio_array = load_audio_direct(audio_path)
@@ -79,7 +78,7 @@ def analyze_audio(audio_path, progress_bar, status_text):
         for word in segment.words:
             words_data.append(word)
             current_scene_words.append(word.word)
-            if word.end - scene_start >= 6.0: # Har 6 second ka ek scene
+            if word.end - scene_start >= 6.0:
                 scenes.append({"start": scene_start, "end": word.end, "text": " ".join(current_scene_words)})
                 scene_start = word.end
                 current_scene_words = []
@@ -87,7 +86,7 @@ def analyze_audio(audio_path, progress_bar, status_text):
         scenes.append({"start": scene_start, "end": words_data[-1].end, "text": " ".join(current_scene_words)})
     return words_data, scenes
 
-# --- STRICT AI ENGINE (NO FAKE FALLBACKS) ---
+# --- STRICT AI ENGINE WITH DEBUGGER ---
 def get_ai_keyword(scene_text, status_text):
     prompt = f"Based on this exact Hindi text snippet: '{scene_text}', give me strictly ONE or TWO English words representing a visual B-roll search query for Pixabay. Return ONLY the words, nothing else."
     
@@ -104,10 +103,14 @@ def get_ai_keyword(scene_text, status_text):
                         max_tokens=8
                     )
                     kw = chat_completion.choices[0].message.content.strip().replace('"', '')
-                    if kw: return kw
-                except Exception:
+                    if kw: 
+                        print(f"DEBUG - Groq Success ({model_name}): {kw}")
+                        return kw
+                except Exception as e:
+                    print(f"DEBUG - Groq Model {model_name} Error: {str(e)}")
                     continue
-        except Exception:
+        except Exception as e:
+            print(f"DEBUG - Groq Client Error: {str(e)}")
             continue
             
     # Try Gemini Backup
@@ -119,10 +122,14 @@ def get_ai_keyword(scene_text, status_text):
                     response = client.models.generate_content(model=model_name, contents=prompt)
                     if response and response.text:
                         kw = response.text.strip().replace('"', '')
-                        if kw: return kw
-                except Exception:
+                        if kw: 
+                            print(f"DEBUG - Gemini Success ({model_name}): {kw}")
+                            return kw
+                except Exception as e:
+                    print(f"DEBUG - Gemini Model {model_name} Error: {str(e)}")
                     continue
-        except Exception:
+        except Exception as e:
+            print(f"DEBUG - Gemini Client Error: {str(e)}")
             continue
             
     raise Exception("AI Keyword generation failed. Please check your API keys.")
@@ -135,7 +142,6 @@ def get_video_for_scene(scene_text, orientation, status_text):
     
     res = requests.get(url, timeout=10).json() 
     if not res.get('hits'):
-        # Fallback query without orientation filter if strict orientation fails
         fallback_url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={keyword}&video_type=film&safesearch=true&order=popular"
         res = requests.get(fallback_url, timeout=10).json()
 
@@ -182,11 +188,11 @@ st.set_page_config(page_title="AI Documentary Maker", page_icon="🎬", layout="
 st.title("🎬 Pure Docu-Studio AI (Strict & Clean)")
 st.write("100% Matching Visuals & Burned Subtitles - No Fake Fallbacks.")
 
-ratio_choice = st.radio("🎥 वीडियो का साइज़ चुनें:", ["16:9 (YouTube Standard)", "9:16 (Shorts / Reels)"], index=0)
+ratio_choice = st.radio("🎥 Video ka size chunein:", ["16:9 (YouTube Standard)", "9:16 (Shorts / Reels)"], index=0)
 target_w, target_h = (1920, 1080) if "16:9" in ratio_choice else (1080, 1920)
 orientation = "horizontal" if "16:9" in ratio_choice else "vertical"
 
-uploaded_file = st.file_uploader("यहाँ अपनी ऑडियो फाइल अपलोड करें (Max: 500MB)", type=["mp3", "wav", "mp4", "m4a", "aac", "mov", "avi"])
+uploaded_file = st.file_uploader("Yahan apni audio file upload karein (Max: 500MB)", type=["mp3", "wav", "mp4", "m4a", "aac", "mov", "avi"])
 
 if uploaded_file and st.button("🔥 Generate Strict Documentary"):
     st.session_state.video_ready = False 
@@ -219,23 +225,22 @@ if uploaded_file and st.button("🔥 Generate Strict Documentary"):
             processed_files_list.append(out_path)
             progress_bar.progress(10 + int((i+1)/len(scenes) * 40))
             
-        status_text.text("🎞️ सीन्स को जोड़ा जा रहा है...")
+        status_text.text("🎞️ Scenes ko joda ja raha hai...")
         with open("concat_list.txt", "w") as f:
             for pf in processed_files_list:
                 f.write(f"file '{pf}'\n")
         
-        status_text.text("📝 कैप्शंस (Yellow Highlight) वीडियो पर जलाए जा रहे हैं...")
+        status_text.text("📝 Captions video par burn kiye ja rahe hain...")
         generate_ass_subtitles(words_data, target_w, target_h)
         
         final_output = "FINAL_DOCUMENTARY.mp4"
         
-        # FFmpeg Subtitle Burn Command
         cmd = f'"{FFMPEG_EXE}" -y -f concat -safe 0 -i concat_list.txt -i "{temp_input_file}" -vf "ass=captions.ass" -c:v libx264 -preset ultrafast -crf 28 -threads 2 -c:a aac -shortest "{final_output}"'
         subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         if os.path.exists(final_output):
             progress_bar.progress(100)
-            status_text.success("✅ डॉक्यूमेंट्री बिल्कुल सही तरीके से तैयार है!")
+            status_text.success("✅ Documentary safalata-poorvak taiyar hai!")
             st.session_state.video_path = final_output
             st.session_state.video_ready = True
         else:
@@ -248,7 +253,7 @@ if uploaded_file and st.button("🔥 Generate Strict Documentary"):
         cleanup_temp_files()
 
 if st.session_state.video_ready and st.session_state.video_path and os.path.exists(st.session_state.video_path):
-    st.markdown("### 🎬 तुम्हारी फाइनल डॉक्यूमेंट्री:")
+    st.markdown("### 🎬 Tumhari Final Documentary:")
     st.video(st.session_state.video_path)
     
     with open(st.session_state.video_path, "rb") as file:
