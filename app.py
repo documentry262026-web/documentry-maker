@@ -48,10 +48,17 @@ def get_exact_duration(path):
         return float(h) * 3600 + float(m) * 60 + float(s)
     return 10.0
 
-# 🌟 नया फीचर: ऑडियो को 10-10 सेकंड के सीन में तोड़ना
+# 🌟 BUG FIXED: यहाँ वापस language="hi" और initial_prompt लगा दिया है!
 def transcribe_and_chunk(path, size, target_length=10.0):
     model = WhisperModel(size, device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(path, task="transcribe", beam_size=5)
+    
+    segments, _ = model.transcribe(
+        path, 
+        language="hi", # सिर्फ हिंदी
+        task="transcribe", 
+        beam_size=5,
+        initial_prompt="यह शुद्ध हिंदी भाषा है। इसे देवनागरी लिपि में ही लिखें।" # उर्दू को रोकने का पक्का इलाज
+    )
     
     seg_list = list(segments)
     if not seg_list:
@@ -63,7 +70,6 @@ def transcribe_and_chunk(path, size, target_length=10.0):
     
     for seg in seg_list:
         current_text += " " + seg.text.strip()
-        # अगर हिस्सा 10 सेकंड का हो गया, तो उसे एक सीन मान लो
         if (seg.end - current_start) >= target_length:
             chunks.append({
                 "text": current_text.strip(),
@@ -74,13 +80,11 @@ def transcribe_and_chunk(path, size, target_length=10.0):
             current_start = seg.end
             current_text = ""
             
-    # बचे हुए हिस्से (Remainder) को एडजस्ट करना
     if current_text.strip():
         if not chunks:
             chunks.append({"text": current_text.strip(), "start": 0.0, "end": seg_list[-1].end, "duration": seg_list[-1].end})
         else:
             rem_duration = seg_list[-1].end - current_start
-            # अगर बचा हुआ हिस्सा 5 सेकंड से छोटा है, तो उसे आखिरी सीन में ही जोड़ दो
             if rem_duration < 5.0:
                 chunks[-1]["text"] += " " + current_text.strip()
                 chunks[-1]["end"] = seg_list[-1].end
@@ -101,6 +105,13 @@ def get_groq_keywords(transcript):
 
     client = Groq(api_key=GK[0])
     
+    models_to_try = [
+        "openai/gpt-oss-20b",     # आपका पसंदीदा मॉडल सबसे पहले
+        "llama3-8b-8192",         
+        "gemma2-9b-it"      
+    ]
+
+    # आपका शानदार प्रॉम्प्ट
     prompt = f"""You are a professional stock-footage search keyword generator for a Hindi voiceover-to-video application.
 
 TASK:
@@ -123,24 +134,34 @@ Now generate the visual search query for this sentence:
 
 Return ONLY the query."""
 
-    r = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=150,
-        temperature=0.3
-    )
-    
-    raw_output = r.choices[0].message.content or ""
-    raw_output = raw_output.strip()
-    
-    clean_text = re.sub(r"[^\w\s]", " ", raw_output)
-    words = [w for w in clean_text.split() if len(w) > 1]
-    final_keywords = " ".join(words[:4]) 
-    
-    if not final_keywords:
-        raise RuntimeError(f"Groq AI Error: AI failed to output valid keywords. Raw output: '{raw_output}'")
-        
-    return final_keywords
+    for model_name in models_to_try:
+        try:
+            r = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=15,
+                temperature=0.1
+            )
+            
+            raw_output = r.choices[0].message.content or ""
+            raw_output = raw_output.strip()
+            
+            if raw_output:
+                clean_text = re.sub(r"[^\w\s]", " ", raw_output)
+                words = [w for w in clean_text.split() if len(w) > 0]
+                final_keywords = " ".join(words[:4]) 
+                
+                if final_keywords:
+                    return final_keywords
+                    
+            st.warning(f"⚠️ Model `{model_name}` returned an empty string. Trying backup model...")
+            
+        except Exception as e:
+            st.warning(f"⚠️ `{model_name}` failed: {str(e)}. Switching to next model...")
+
+    raise RuntimeError("All Groq models failed. The API might be down or key is exhausted.")
 
 def fetch_pixabay_media(query, orientation):
     if not PK:
@@ -204,7 +225,6 @@ if st.button("Generate Cinematic Video", disabled=audio_file is None):
             st.info("🎙️ Transcribing and analyzing scenes...")
             chunks = transcribe_and_chunk(voice_path, whisper_size, target_length=10.0)
             
-            # आखिरी सीन की टाइमिंग को ऑडियो की एक्जैक्ट लंबाई से मैच करना
             if chunks:
                 chunks[-1]['duration'] = total_audio_duration - chunks[-1]['start']
 
@@ -212,7 +232,6 @@ if st.button("Generate Cinematic Video", disabled=audio_file is None):
 
             scene_files = []
             
-            # 🎬 हर 10 सेकंड के सीन के लिए अलग वीडियो डाउनलोड और रेंडर करना
             for i, chunk in enumerate(chunks):
                 st.write(f"---")
                 st.write(f"**Scene {i+1} ({chunk['duration']:.1f}s):** {chunk['text']}")
@@ -230,7 +249,6 @@ if st.button("Generate Cinematic Video", disabled=audio_file is None):
                 out_scene = os.path.join(tmp_dir, f"scene_{i}.mp4")
                 dur = chunk['duration']
                 
-                # 🎞️ सिनेमैटिक फेड इफ़ेक्ट (शुरुआत में 0.5s Fade-In, अंत में 0.5s Fade-Out)
                 fade_in = "fade=t=in:st=0:d=0.5"
                 fade_out = f"fade=t=out:st={dur-0.5}:d=0.5"
 
@@ -255,24 +273,21 @@ if st.button("Generate Cinematic Video", disabled=audio_file is None):
                 if result.returncode != 0:
                     raise RuntimeError(f"Scene {i+1} render failed:\n{result.stderr[-1000:]}")
                 
-                # सुरक्षित रूप से लिस्ट में जोड़ना (ताकि स्लैश का एरर न आए)
                 scene_files.append(f"file 'scene_{i}.mp4'")
 
             st.info("🎬 Mixing all scenes with Voiceover...")
             
-            # Concat File बनाना
             list_path = os.path.join(tmp_dir, "list.txt")
             with open(list_path, "w") as f:
                 f.write("\n".join(scene_files))
 
             final_path = os.path.join(tmp_dir, "final_output.mp4")
             
-            # 🔊 सभी वीडियो को जोड़कर उस पर एक साथ ओरिजिनल वॉइसओवर लगाना
             concat_cmd = [
                 exe, "-y", "-f", "concat", "-safe", "0", "-i", list_path,
                 "-i", voice_path,
                 "-map", "0:v:0", "-map", "1:a:0",
-                "-c:v", "copy", # Copying video streams = Super Fast!
+                "-c:v", "copy",
                 "-c:a", "aac", "-b:a", "128k",
                 "-shortest", "-movflags", "+faststart", final_path
             ]
