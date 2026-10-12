@@ -39,17 +39,15 @@ def run(cmd, timeout=400):
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return res
 
-# फाइल की असली (Exact) लंबाई निकालने का सबसे तगड़ा तरीका
+# फाइल की असली लंबाई (Exact Duration) निकालने का फंक्शन
 def get_exact_duration(path):
     exe = ffmpeg()
     result = subprocess.run([exe, "-i", path], capture_output=True, text=True)
-    # FFmpeg फाइल की डिटेल्स stderr में देता है
     match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", result.stderr)
     if match:
         h, m, s = match.groups()
-        total_seconds = float(h) * 3600 + float(m) * 60 + float(s)
-        return total_seconds
-    return 10.0 # अगर कोई बहुत ही अजीब फाइल हो तो ही यह चलेगा
+        return float(h) * 3600 + float(m) * 60 + float(s)
+    return 10.0
 
 def transcribe_audio(path, size):
     model = WhisperModel(size, device="cpu", compute_type="int8")
@@ -59,24 +57,36 @@ def transcribe_audio(path, size):
     full_text = " ".join([seg.text.strip() for seg in seg_list])
     return full_text
 
+# एकदम स्ट्रिक्ट कीवर्ड फंक्शन (कोई फालतू डिफ़ॉल्ट बैकग्राउंड नहीं)
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
+    
+    if not transcript or not transcript.strip():
+        raise RuntimeError("Whisper Error: Transcript is empty. No voiceover detected to generate keywords.")
+
     client = Groq(api_key=GK[0])
     prompt = (
-        "Extract 3 to 5 highly relevant visual search keywords in English for stock video search "
-        "based on the following transcript. Keep it concise, separated by commas, with no extra text or quotes.\n\n"
+        "Analyze the following transcript and extract 2 or 3 highly specific visual search keywords in English "
+        "for fetching a stock video that exactly matches the context. "
+        "Only provide the keywords separated by spaces, no commas, no extra text, no quotes.\n\n"
         f"Transcript: {transcript}"
     )
-    # आपका वर्किंग मॉडल यहाँ लगा दिया है
+    
     r = client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=60,
-        temperature=0.3
+        max_tokens=30,
+        temperature=0.2
     )
+    
     keywords = r.choices[0].message.content.strip().replace('"', '').replace("'", "")
-    return keywords if keywords else "cinematic nature background"
+    
+    # अगर ग्रॉक ने कीवर्ड नहीं दिया, तो डिफ़ॉल्ट वीडियो लगाने के बजाय सीधा एरर दो!
+    if not keywords or keywords.lower() in ["none", "null", "empty"]:
+        raise RuntimeError("Groq AI Error: Failed to extract relevant keywords for this voiceover. Cannot proceed without accurate context.")
+        
+    return keywords
 
 def fetch_pixabay_media(query, orientation):
     if not PK:
@@ -113,7 +123,8 @@ def fetch_pixabay_media(query, orientation):
     except Exception:
         pass
 
-    raise RuntimeError("No media found on Pixabay for the given query.")
+    # अगर उस कीवर्ड का कुछ नहीं मिला, तो सीधा एरर!
+    raise RuntimeError(f"Pixabay Error: No video or image found on Pixabay for the strict keywords: '{query}'.")
 
 # ================= UI Components ================= #
 st.header("1. Upload Voiceover")
@@ -126,29 +137,27 @@ whisper_size = st.selectbox("Whisper Model Size", ["tiny", "base", "small"], ind
 st.header("2. Video Settings")
 ratio = st.radio("Output Aspect Ratio", ["9:16 (Shorts/Reels)", "16:9 (Landscape)"], horizontal=True)
 width, height = (720, 1280) if "9:16" in ratio else (1280, 720)
-custom_keyword = st.text_input("Custom Visual Keywords (Optional - leave blank to auto-detect via AI)", "")
+custom_keyword = st.text_input("Custom Visual Keywords (Optional - Override AI if you want)", "")
 
 st.header("3. Generate Final Video")
 if st.button("Generate Video", disabled=audio_file is None):
-    # Temporary डायरेक्टरी ताकि 1GB स्टोरेज फुल न हो
     with tempfile.TemporaryDirectory() as tmp_dir:
         try:
             ext = Path(audio_file.name).suffix or ".mp3"
             voice_path = os.path.join(tmp_dir, f"voice{ext}")
             Path(voice_path).write_bytes(audio_file.getvalue())
 
-            # फाइल की असली लंबाई (Duration) निकालना
             duration = get_exact_duration(voice_path)
             st.write(f"**Exact Audio Duration:** {duration:.2f} seconds")
 
             st.info("🎙️ Transcribing voiceover via Whisper...")
             transcript = transcribe_audio(voice_path, whisper_size)
 
-            st.info("🤖 Extracting smart visual keywords via Groq (openai/gpt-oss-20b)...")
+            st.info("🤖 Extracting strict visual keywords via Groq (openai/gpt-oss-20b)...")
             search_query = custom_keyword.strip() if custom_keyword.strip() else get_groq_keywords(transcript)
-            st.write(f"**Search Query:** `{search_query}`")
+            st.write(f"**Final Search Query:** `{search_query}`")
 
-            st.info("🔍 Fetching media from Pixabay...")
+            st.info("🔍 Fetching accurate media from Pixabay...")
             media_info = fetch_pixabay_media(search_query, "vertical" if width < height else "horizontal")
             
             media_file_path = os.path.join(tmp_dir, "media_file" + (".mp4" if media_info["type"] == "video" else ".jpg"))
@@ -160,7 +169,6 @@ if st.button("Generate Video", disabled=audio_file is None):
             final_path = os.path.join(tmp_dir, "final_output.mp4")
             exe = ffmpeg()
 
-            # Fade In / Fade Out का कैलकुलेशन
             fade_duration = min(1.0, duration / 4)
             out_fade_start = max(0, duration - fade_duration)
 
@@ -182,7 +190,6 @@ if st.button("Generate Video", disabled=audio_file is None):
                     "-shortest", "-movflags", "+faststart", final_path
                 ]
             else:
-                # फोटो के लिए Zoom In/Out (Motion Graphics)
                 zoom_filter = (
                     f"scale=8000:-1,"
                     f"zoompan=z='min(zoom+0.001,1.25)':d={int(duration*30)}:s={width}x{height}:fps=30,"
@@ -208,7 +215,7 @@ if st.button("Generate Video", disabled=audio_file is None):
                 raise RuntimeError("Generated video file is empty or missing.")
 
             final_bytes = Path(final_path).read_bytes()
-            st.success("✅ Video successfully generated!")
+            st.success("✅ Video successfully generated with accurate visuals!")
             st.video(final_bytes)
             st.download_button(
                 "📥 Download Final Video",
@@ -218,4 +225,4 @@ if st.button("Generate Video", disabled=audio_file is None):
             )
 
         except Exception as e:
-            show_error("Video Generation Failed", e)
+            show_error("Process Stopped / Error", e)
