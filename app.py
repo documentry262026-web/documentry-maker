@@ -93,7 +93,7 @@ def correct_hindi(data):
         )
         
         r = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
+            model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=min(8192, max(500, len(words) * 12 + 200)),
             temperature=0.1
