@@ -24,7 +24,7 @@ GROQ_KEYS = [
     "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",
     "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"
 ]
-GROQ_MODELS = ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768']
+GROQ_MODELS = ['openai/gpt-oss-20b', 'openai/gpt-oss-120b']
 
 # --- GEMINI BACKUP KEYS ---
 GEMINI_KEYS = [
