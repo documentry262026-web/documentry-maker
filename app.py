@@ -67,7 +67,7 @@ def get_groq_keywords(transcript):
     client = Groq(api_key=GK[0])
     
     # 1. पहले आपका पसंदीदा मॉडल ट्राई करेंगे
-    primary_model = "openai/gpt-oss-20b"
+    primary_model = "openai/gpt-oss-120b"
     # 2. अगर वह फेल हुआ तो यह स्टेबल बैकअप मॉडल यूज़ होगा
     fallback_model = "llama-3.1-8b-instant" 
 
