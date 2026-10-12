@@ -74,8 +74,41 @@ def get_groq_keywords(transcript):
     ]
 
     prompt = (
-        "Extract exactly 3 English words that describe the visual scene of this text.Give that thing n want dont give any extra words or somethng just ive me keywords okay for this script  "
-        "Do not write sentences. Only output the 3 words.NOTE:DONOT return an empty string.\n\n"
+  You are a professional stock-footage search keyword generator for a Hindi voiceover-to-video application.
+
+TASK:
+Read the Hindi sentence provided below and identify the single most visually relevant scene that represents what is happening in that sentence.
+
+OUTPUT RULES — STRICT:
+
+1. Return exactly ONE short English search query containing 2–4 words.
+2. Describe a concrete, filmable visual that could realistically be found on Pixabay.
+3. Prefer specific objects, people, actions, locations, or events mentioned or clearly implied by the sentence.
+4. Translate the meaning into English before selecting the visual.
+5. Do not return Hindi, explanations, introductions, quotation marks, labels, markdown, or punctuation.
+6. Never return an empty response.
+7. Never return the words "none", "unknown", "N/A", "keyword", or "B-roll".
+8. If the sentence is abstract, choose the closest concrete visual metaphor.
+9. If the sentence is unclear, select the most plausible visual supported by its meaning.
+10. Do not use generic fallback terms such as "nature" or "documentary" unless the sentence genuinely describes them.
+
+EXAMPLES:
+Hindi: "सड़क पर बहुत ज्यादा ट्रैफिक था"
+Output: busy city traffic
+
+Hindi: "वैज्ञानिकों को अंतरिक्ष से सिग्नल मिला"
+Output: radio telescope observatory
+
+Hindi: "बच्चे मैदान में क्रिकेट खेल रहे थे"
+Output: children playing cricket
+
+Hindi: "एक आदमी जंगल में अकेला चल रहा था"
+Output: man walking forest
+
+Now generate the visual search query for this sentence:
+{{SCENE_TEXT}}
+
+Return ONLY the query.\n\n"
         f"Text: {transcript}"
     )
 
