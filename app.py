@@ -8,7 +8,8 @@ import streamlit as st
 import numpy as np
 from google import genai
 from faster_whisper import WhisperModel
-from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
+from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip
+from moviepy.video.fx.all import crop
 
 # --- MAGIC FIX FOR PILLOW ANTIALIAS ERROR ---
 import PIL.Image
@@ -17,12 +18,10 @@ if not hasattr(PIL.Image, 'ANTIALIAS'):
 
 # --- 10 API KEYS KA POWERFUL POOL ---
 GEMINI_KEYS = [
-    # Purani 4 Keys
     "AQ.Ab8RN6IglBEm55inC7zLAOlN1HQ8Qr4JOCOQrbGwL-1vYpXSXQ",
     "AQ.Ab8RN6JPeFn--zNyZFTnQJzj9M8lMwl4PfX4R1Qt3SFKoQ4D_w",
     "AQ.Ab8RN6IVQYNwTLU-r1GGLqI8Jcf-eNva9G0WfwRy6mUcegUTMQ",
     "AQ.Ab8RN6KCsY2r4jW9nu8C8RbAY8k9vn7SMbNwzAayQBDQj1ahUA",
-    # Nayi 6 Keys
     "AQ.Ab8RN6IF_rUC9PBAFwfqXOPcjp8pAvQyhdiQ903Nx1Qjs9XlzQ",
     "AQ.Ab8RN6Ka2qaZ8MmcqlRf5_7uWblcVZrdYIXCrQaAu3kekUYoAA",
     "AQ.Ab8RN6IpSUMTKhGEuJK4GWtaeYYE2tezI1wunXOBIomhQAkQaw",
@@ -34,10 +33,10 @@ GEMINI_KEYS = [
 TARGET_MODELS = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-flash']
 PIXABAY_API_KEY = "57871281-bac58345c5fba7b07f0655556"
 
-# --- SMART AUTO-CLEANUP FUNCTION ---
+# --- SMART AUTO-CLEANUP FUNCTION (Storage Saver) ---
 def cleanup_temp_files():
-    print("🧹 Cleaning up temporary files to save storage...")
-    files_to_delete = glob.glob("temp_*") + ["captions.ass"] 
+    print("🧹 Cleaning up RAM & Storage...")
+    files_to_delete = glob.glob("temp_*") + glob.glob("processed_scene_*.mp4") + ["captions.ass", "concat_list.txt"]
     for file_path in files_to_delete:
         try:
             if os.path.exists(file_path):
@@ -47,10 +46,7 @@ def cleanup_temp_files():
 
 # --- FFMPEG DIRECT AUDIO DECODING ---
 def load_audio_direct(file_path):
-    cmd = [
-        "ffmpeg", "-i", file_path,
-        "-f", "s16le", "-ac", "1", "-ar", "16000", "-"
-    ]
+    cmd = ["ffmpeg", "-i", file_path, "-f", "s16le", "-ac", "1", "-ar", "16000", "-"]
     out = subprocess.run(cmd, capture_output=True, check=True).stdout
     return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
@@ -78,11 +74,9 @@ def analyze_audio(audio_path, progress_bar, status_text):
         scenes.append({"start": scene_start, "end": words_data[-1].end, "text": " ".join(current_scene_words)})
     return words_data, scenes
 
-# --- SMART MULTI-KEY & RATE-LIMIT MANAGER ---
+# --- MULTI-KEY & RATE-LIMIT MANAGER (Sleep bypass) ---
 def get_ai_keyword(scene_text):
     prompt = f"Based on this Hindi text: '{scene_text}', give me exactly ONE short english search phrase (max 2 words) to find documentary B-roll footage. Only return the words, no symbols."
-    
-    # 10 Keys me se ek-ek karke check karega
     for api_key in GEMINI_KEYS:
         try:
             client = genai.Client(api_key=api_key)
@@ -92,50 +86,58 @@ def get_ai_keyword(scene_text):
                     if response and response.text:
                         return response.text.strip().replace('"', '')
                 except Exception:
-                    continue # Ek model fail hua, agla try karo
+                    continue
         except Exception:
-            continue # Ek key fail hui, agli try karo
-            
-    # Agar 10 ki 10 keys fail ho jayein tabhi ye error aayega
-    raise Exception("Saari 10 Gemini API keys expire ho chuki hain ya Rate-Limit cross kar chuki hain. Kripya nayi keys dalein.")
+            continue
+    raise Exception("API Limit reached. 1 minute baad try karein.")
 
-# --- FETCH EXACT DOCUMENTARY VISUALS ---
-def get_video_for_scene(scene_text, duration):
+def get_video_for_scene(scene_text, orientation):
     keyword = get_ai_keyword(scene_text)
-    
-    url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={keyword}&video_type=film&orientation=horizontal&safesearch=true&order=popular"
+    url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={keyword}&video_type=film&orientation={orientation}&safesearch=true&order=popular"
     res = requests.get(url).json()
     
+    # Agar specific orientation me video na mile, toh fallback karo
+    if not res.get('hits'):
+        fallback_url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={keyword}&video_type=film&safesearch=true&order=popular"
+        res = requests.get(fallback_url).json()
+
     if res.get('hits'):
-        video_url = res['hits'][0]['videos']['medium']['url']
-        vid_res = requests.get(video_url)
+        vid_res = requests.get(res['hits'][0]['videos']['medium']['url'])
         filename = f"temp_{keyword.replace(' ', '_')}.mp4"
         with open(filename, 'wb') as f:
             f.write(vid_res.content)
         return filename
     return None
 
-def apply_cinematic_effects(clip, duration):
+def apply_cinematic_effects(clip, duration, target_w, target_h):
     effect = random.choice(['zoom_in', 'zoom_out'])
     if effect == 'zoom_in':
-        clip = clip.resize(lambda t: 1 + 0.03 * t)
+        zoomed = clip.resize(lambda t: 1 + 0.03 * t)
     else:
-        clip = clip.resize(lambda t: 1.15 - 0.03 * t)
-    return clip.set_position(('center', 'center')).subclip(0, duration)
+        zoomed = clip.resize(lambda t: 1.15 - 0.03 * t)
+    
+    zoomed = zoomed.set_position(('center', 'center'))
+    # Ye step video ko phatne ya resolution kharab hone se rokti hai
+    comp = CompositeVideoClip([zoomed], size=(target_w, target_h)).subclip(0, duration)
+    return comp
 
-def generate_ass_subtitles(words_data, output_file="captions.ass"):
-    ass_content = """[Script Info]
+# --- SMART CAPTIONS GENERATOR ---
+def generate_ass_subtitles(words_data, target_w, target_h, output_file="captions.ass"):
+    # 9:16 (Shorts) ke liye font size aur position thodi change hoti hai
+    font_size = 65 if target_w == 1920 else 55
+    margin_v = 120 if target_h == 1080 else 250 
+    
+    ass_content = f"""[Script Info]
 ScriptType: v4.00+
-PlayResX: 1920
-PlayResY: 1080
+PlayResX: {target_w}
+PlayResY: {target_h}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,65,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,3,2,10,10,120,1
+Style: Default,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,3,2,10,10,{margin_v},1
 
 [Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"""
     def format_time(seconds):
         h, m, s = int(seconds // 3600), int((seconds % 3600) // 60), int(seconds % 60)
         return f"{h}:{m:02d}:{s:02d}.{int((seconds % 1) * 100):02d}"
@@ -152,7 +154,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 # --- STREAMLIT WEB GUI ---
 st.set_page_config(page_title="AI Documentary Maker", page_icon="🎬", layout="centered")
 st.title("🎬 Pure Docu-Studio AI (Pro Mode)")
-st.write("Upload your Audio/Video file, and AI will build a 100% cinematic documentary!")
+st.write("Upload Audio/Video. RAM-optimized, Anti-Stretch & Aspect Ratio settings!")
+
+# --- NAYA FEATURE: RATIO SELECTOR ---
+ratio_choice = st.radio("🎥 वीडियो का साइज़ चुनें (Aspect Ratio):", ["16:9 (YouTube Standard)", "9:16 (Shorts / Reels)"], index=0)
+target_w, target_h = (1920, 1080) if "16:9" in ratio_choice else (1080, 1920)
+orientation = "horizontal" if "16:9" in ratio_choice else "vertical"
 
 uploaded_file = st.file_uploader("यहाँ अपनी फाइल अपलोड करें (Max: 500MB)", type=["mp3", "wav", "mp4", "m4a", "aac", "mov", "avi"])
 
@@ -165,46 +172,68 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
         
     progress_bar = st.progress(0)
     status_text = st.empty()
+    processed_files_list = []
     
     try:
         words_data, scenes = analyze_audio(temp_input_file, progress_bar, status_text)
-        video_clips = []
         
         for i, scene in enumerate(scenes):
-            status_text.text(f"🎬 Scene {i+1}/{len(scenes)} के लिए क्लिप्स डाउनलोड हो रही हैं... (Taking a 4-sec breather for API)")
+            status_text.text(f"🎬 Scene {i+1}/{len(scenes)} प्रोसेस हो रहा है... (API Sleep 4s)")
             
-            # --- MAGIC BRAKE (Rate Limit Bypass) ---
+            # Rate Limit Bypass
             time.sleep(4) 
             
             duration = scene['end'] - scene['start']
-            vid_path = get_video_for_scene(scene['text'], duration)
+            vid_path = get_video_for_scene(scene['text'], orientation)
             
             if vid_path:
-                clip = VideoFileClip(vid_path).resize((1920, 1080))
-                if clip.duration < duration: clip = clip.loop(duration=duration)
-                clip = apply_cinematic_effects(clip, duration)
+                clip = VideoFileClip(vid_path)
+                
+                # --- SMART CROP: No Stretching (पिचकेगा नहीं) ---
+                clip_ratio = clip.w / clip.h
+                target_ratio = target_w / target_h
+                
+                if clip_ratio > target_ratio:
+                    clip = clip.resize(height=target_h)
+                    clip = crop(clip, x_center=clip.w/2, width=target_w, height=target_h)
+                else:
+                    clip = clip.resize(width=target_w)
+                    clip = crop(clip, y_center=clip.h/2, width=target_w, height=target_h)
+                    
+                if clip.duration < duration: 
+                    clip = clip.loop(duration=duration)
+                
+                # Cinematic Effects apply karna (Strict Resolution)
+                clip = apply_cinematic_effects(clip, duration, target_w, target_h)
                 if i > 0: clip = clip.fadein(0.5)
-                video_clips.append(clip)
+                
+                # RAM SAVER
+                out_path = f"processed_scene_{i}.mp4"
+                clip.write_videofile(out_path, fps=24, codec="libx264", audio=False, logger=None)
+                processed_files_list.append(out_path)
+                
+                clip.close()
+                del clip
+                
             progress_bar.progress(10 + int((i+1)/len(scenes) * 40))
             
-        if not video_clips:
-            raise Exception("Koi bhi relevant visual nahi mila. Please try another topic.")
+        if not processed_files_list:
+            raise Exception("Koi bhi relevant visual nahi mila.")
             
-        status_text.text("🎞️ विजुअल्स, फेट्स, और ऑडियो को जोड़ा जा रहा है...")
-        final_video = concatenate_videoclips(video_clips, method="compose")
-        final_video = final_video.set_audio(AudioFileClip(temp_input_file))
-        
-        temp_out = "temp_render.mp4"
-        final_video.write_videofile(temp_out, fps=24, codec="libx264", audio_codec="aac", logger=None)
+        status_text.text("🎞️ सारी क्लिप्स को बिना RAM यूज़ किए जोड़ा जा रहा है...")
+        with open("concat_list.txt", "w") as f:
+            for pf in processed_files_list:
+                f.write(f"file '{pf}'\n")
         
         status_text.text("📝 कैप्शंस (Yellow Highlight) वीडियो पर जलाए जा रहे हैं...")
-        generate_ass_subtitles(words_data)
+        generate_ass_subtitles(words_data, target_w, target_h)
         
         final_output = "FINAL_DOCUMENTARY.mp4"
-        subprocess.run(f'ffmpeg -y -i {temp_out} -vf "ass=captions.ass" -c:a copy {final_output}', shell=True)
+        cmd = f'ffmpeg -y -f concat -safe 0 -i concat_list.txt -i {temp_input_file} -vf "ass=captions.ass" -c:v libx264 -preset fast -c:a aac -shortest {final_output}'
+        subprocess.run(cmd, shell=True)
         
         progress_bar.progress(100)
-        status_text.success("✅ बधाई हो! तुम्हारी 100% Genuine डॉक्यूमेंट्री तैयार है!")
+        status_text.success("✅ बधाई हो! तुम्हारी लंबी डॉक्यूमेंट्री तैयार है!")
         
         with open(final_output, "rb") as file:
             st.download_button(label="⬇️ Download Final Video", data=file, file_name="My_Documentary.mp4", mime="video/mp4")
