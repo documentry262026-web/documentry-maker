@@ -7,6 +7,7 @@ import subprocess
 import streamlit as st
 import numpy as np
 from google import genai
+from groq import Groq
 from faster_whisper import WhisperModel
 from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, ColorClip
 from moviepy.video.fx.all import crop
@@ -15,6 +16,13 @@ from moviepy.video.fx.all import crop
 import PIL.Image
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
+
+# --- API KEYS ---
+GROQ_KEYS = [
+    "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",
+    "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"
+]
+GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b']
 
 GEMINI_KEYS = [
     "AQ.Ab8RN6IglBEm55inC7zLAOlN1HQ8Qr4JOCOQrbGwL-1vYpXSXQ",
@@ -28,10 +36,11 @@ GEMINI_KEYS = [
     "AQ.Ab8RN6JQgJgnDoXG-lTryMKol-lwYeZhgq3NXMVNouYtu_bssw",
     "AQ.Ab8RN6IYjqQiuJ_4mI91fUoebTEzbHfD_YTCoEAqDl_WwUZEgQ"
 ]
+GEMINI_MODELS = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-flash']
 
-TARGET_MODELS = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-flash']
 PIXABAY_API_KEY = "57871281-bac58345c5fba7b07f0655556"
 
+# --- SYSTEM FUNCTIONS ---
 def cleanup_temp_files():
     print("🧹 Cleaning up RAM & Storage...")
     files_to_delete = glob.glob("temp_*") + glob.glob("processed_scene_*.mp4") + ["captions.ass", "concat_list.txt"]
@@ -70,40 +79,62 @@ def analyze_audio(audio_path, progress_bar, status_text):
         scenes.append({"start": scene_start, "end": words_data[-1].end, "text": " ".join(current_scene_words)})
     return words_data, scenes
 
-# --- THE REAL FIX: PROPER RETRY ENGINE (NO JUGAAD) ---
+# --- HYBRID AI ENGINE (GROQ FIRST, GEMINI SECOND) ---
 def get_ai_keyword(scene_text, status_text):
     prompt = f"Based on this Hindi text: '{scene_text}', give me exactly ONE short english search phrase (max 2 words) to find documentary B-roll footage. Only return the words, no symbols."
     
-    for attempt in range(3): # 3 Rounds of retry
+    # PHASE 1: GROQ API (Superfast)
+    for attempt in range(2): 
+        for idx, api_key in enumerate(GROQ_KEYS):
+            try:
+                client = Groq(api_key=api_key)
+                for model_name in GROQ_MODELS:
+                    try:
+                        chat_completion = client.chat.completions.create(
+                            messages=[{"role": "user", "content": prompt}],
+                            model=model_name,
+                            temperature=0.5,
+                            max_tokens=10
+                        )
+                        keyword = chat_completion.choices[0].message.content.strip().replace('"', '')
+                        return keyword
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        if "429" in error_msg or "rate" in error_msg:
+                            status_text.text(f"⏳ Groq Limit on Key {idx+1}. Cooldown (5s)...")
+                            time.sleep(5)
+                            continue
+                        elif "401" in error_msg or "auth" in error_msg:
+                            break # Move to next key
+                        else:
+                            continue
+            except Exception:
+                continue
+    
+    # PHASE 2: GEMINI API (Fallback if Groq completely fails)
+    status_text.text("🔄 Groq busy/failed. Switching to Gemini Backup Engine...")
+    for attempt in range(2): 
         for idx, api_key in enumerate(GEMINI_KEYS):
             try:
                 client = genai.Client(api_key=api_key)
-                for model_name in TARGET_MODELS:
+                for model_name in GEMINI_MODELS:
                     try:
                         response = client.models.generate_content(model=model_name, contents=prompt)
                         if response and response.text:
                             return response.text.strip().replace('"', '')
                     except Exception as e:
                         error_msg = str(e).lower()
-                        # Rate Limit aaye toh Crash mat karo, Wait karo!
-                        if "429" in error_msg or "quota" in error_msg or "rate" in error_msg:
-                            status_text.text(f"⏳ Speed Limit on Key {idx+1}. Cooldown (10s) bypass...")
-                            time.sleep(10)
+                        if "429" in error_msg or "rate" in error_msg or "quota" in error_msg:
+                            time.sleep(5)
                             continue 
-                        # Key expire ho toh agli par jao
                         elif "401" in error_msg or "unauthenticated" in error_msg:
                             break 
                         else:
                             continue
             except Exception:
                 continue
-        
-        # Agar ek round me saari keys busy hain, toh system ko aaram do
-        status_text.text(f"🔄 All keys busy. Taking a 15-second deep breath (Attempt {attempt+1}/3)...")
-        time.sleep(15)
-        
-    # Agar 3 round ke baad bhi nahi chala, tabhi Error dega (No Fake Keywords)
-    raise Exception("FINAL ERROR: Google AI Servers are strictly blocking or all 10 keys are expired (Error 401). Please check keys.")
+
+    raise Exception("FINAL ERROR: Both Groq and Gemini APIs failed or are blocked. Please check your keys.")
 
 def get_video_for_scene(scene_text, orientation, status_text):
     try:
@@ -124,7 +155,6 @@ def get_video_for_scene(scene_text, orientation, status_text):
                 f.write(vid_res.content)
             return filename
     except Exception as e:
-        # Agar error API se aayi hai (Raise exception)
         if "FINAL ERROR" in str(e):
             raise e
         print(f"Pixabay Video Fetch Failed: {e}")
@@ -171,8 +201,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
         f.write(ass_content)
 
 st.set_page_config(page_title="AI Documentary Maker", page_icon="🎬", layout="centered")
-st.title("🎬 Pure Docu-Studio AI (Pro Mode)")
-st.write("Upload Audio/Video. RAM-optimized, Anti-Freeze & Aspect Ratio settings!")
+st.title("🎬 Pure Docu-Studio AI (Groq + Gemini)")
+st.write("Upload Audio/Video. Superfast AI with Aspect Ratio settings!")
 
 ratio_choice = st.radio("🎥 वीडियो का साइज़ चुनें (Aspect Ratio):", ["16:9 (YouTube Standard)", "9:16 (Shorts / Reels)"], index=0)
 target_w, target_h = (1920, 1080) if "16:9" in ratio_choice else (1080, 1920)
@@ -195,11 +225,10 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
         words_data, scenes = analyze_audio(temp_input_file, progress_bar, status_text)
         
         for i, scene in enumerate(scenes):
-            status_text.text(f"🎬 Scene {i+1}/{len(scenes)} प्रोसेस हो रहा है...")
+            status_text.text(f"🎬 Scene {i+1}/{len(scenes)} प्रोसेस हो रहा है... (Powered by Groq)")
             
             duration = scene['end'] - scene['start']
             
-            # Pass status_text to see EXACTLY what AI is doing
             vid_path = get_video_for_scene(scene['text'], orientation, status_text)
             
             if vid_path:
@@ -220,7 +249,6 @@ if uploaded_file and st.button("🔥 Generate Documentary Video"):
                 clip = apply_cinematic_effects(clip, duration, target_w, target_h)
                 if i > 0: clip = clip.fadein(0.5)
             else:
-                # Agar sirf Pixabay video na de paaye (AI ne keyword diya par video nahi mili), toh audio sync ke liye Black Screen
                 clip = ColorClip(size=(target_w, target_h), color=(0,0,0), duration=duration)
                 if i > 0: clip = clip.fadein(0.5)
                 
