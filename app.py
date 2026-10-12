@@ -15,12 +15,20 @@ import PIL.Image
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
-# Tumhari API Keys
+# --- 10 API KEYS KA POWERFUL POOL ---
 GEMINI_KEYS = [
+    # Purani 4 Keys
     "AQ.Ab8RN6IglBEm55inC7zLAOlN1HQ8Qr4JOCOQrbGwL-1vYpXSXQ",
     "AQ.Ab8RN6JPeFn--zNyZFTnQJzj9M8lMwl4PfX4R1Qt3SFKoQ4D_w",
     "AQ.Ab8RN6IVQYNwTLU-r1GGLqI8Jcf-eNva9G0WfwRy6mUcegUTMQ",
-    "AQ.Ab8RN6KCsY2r4jW9nu8C8RbAY8k9vn7SMbNwzAayQBDQj1ahUA"
+    "AQ.Ab8RN6KCsY2r4jW9nu8C8RbAY8k9vn7SMbNwzAayQBDQj1ahUA",
+    # Nayi 6 Keys
+    "AQ.Ab8RN6IF_rUC9PBAFwfqXOPcjp8pAvQyhdiQ903Nx1Qjs9XlzQ",
+    "AQ.Ab8RN6Ka2qaZ8MmcqlRf5_7uWblcVZrdYIXCrQaAu3kekUYoAA",
+    "AQ.Ab8RN6IpSUMTKhGEuJK4GWtaeYYE2tezI1wunXOBIomhQAkQaw",
+    "AQ.Ab8RN6LS63wOgSxVNGl8y1w7hW0hb-cRwy3QgpmwTLbpgPF2Yg",
+    "AQ.Ab8RN6JQgJgnDoXG-lTryMKol-lwYeZhgq3NXMVNouYtu_bssw",
+    "AQ.Ab8RN6IYjqQiuJ_4mI91fUoebTEzbHfD_YTCoEAqDl_WwUZEgQ"
 ]
 
 TARGET_MODELS = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-flash']
@@ -74,6 +82,7 @@ def analyze_audio(audio_path, progress_bar, status_text):
 def get_ai_keyword(scene_text):
     prompt = f"Based on this Hindi text: '{scene_text}', give me exactly ONE short english search phrase (max 2 words) to find documentary B-roll footage. Only return the words, no symbols."
     
+    # 10 Keys me se ek-ek karke check karega
     for api_key in GEMINI_KEYS:
         try:
             client = genai.Client(api_key=api_key)
@@ -83,11 +92,12 @@ def get_ai_keyword(scene_text):
                     if response and response.text:
                         return response.text.strip().replace('"', '')
                 except Exception:
-                    continue
+                    continue # Ek model fail hua, agla try karo
         except Exception:
-            continue
+            continue # Ek key fail hui, agli try karo
             
-    raise Exception("Saari Gemini API keys Rate-Limit ho chuki hain. Kripya 1 minute baad try karein.")
+    # Agar 10 ki 10 keys fail ho jayein tabhi ye error aayega
+    raise Exception("Saari 10 Gemini API keys expire ho chuki hain ya Rate-Limit cross kar chuki hain. Kripya nayi keys dalein.")
 
 # --- FETCH EXACT DOCUMENTARY VISUALS ---
 def get_video_for_scene(scene_text, duration):
