@@ -66,7 +66,6 @@ def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
     seg_list = list(segments)
     chunks = []
     
-    # 🌟 पूरा टेक्स्ट एक साथ निकाल लिया ताकि अगर कोई हिस्सा खाली हो, तो इसे यूज़ कर सकें
     full_clean_text = ""
     for seg in seg_list:
         clean = re.sub(r'[^a-zA-Z\u0900-\u097F\s]', ' ', seg.text.strip())
@@ -93,11 +92,10 @@ def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
                 
         chunk_text = chunk_text.strip()
         
-        # 🌟 BUG FIX: अगर 10 सेकंड में आवाज़ नहीं है, तो पूरी वीडियो की कहानी (full_clean_text) ले लेगा
         if not chunk_text and chunks:
             chunk_text = chunks[-1]["text"]
         elif not chunk_text and not chunks:
-            chunk_text = full_clean_text if full_clean_text else "nature landscape"
+            chunk_text = full_clean_text if full_clean_text else "beautiful nature landscape"
             
         chunks.append({
             "text": chunk_text,
@@ -108,7 +106,7 @@ def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
                 
     return chunks
 
-# 🚀 100% SIMPLE PROMPT (As you requested: "Give me keywords only")
+# 🚀 GROQ FIX: High max_tokens + Smart Extraction
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
@@ -116,26 +114,35 @@ def get_groq_keywords(transcript):
     client = Groq(api_key=GK[0])
     model_name = "openai/gpt-oss-20b" 
 
-    # 🌟 बिल्कुल सिंपल प्रॉम्प्ट, जिससे यह मॉडल कभी हैंग नहीं होगा
-    prompt = f"Give me 3 English visual search keywords ONLY for this text. Do not write sentences, just words:\n\n{transcript}"
+    # प्रॉम्प्ट को ऐसा बनाया है कि मॉडल रिलैक्स होकर जवाब दे, क्रैश न हो।
+    prompt = (
+        "Analyze the following Hindi or Hinglish text and suggest exactly 3 English keywords for finding a relevant stock video. "
+        "Format your response as just the keywords separated by spaces.\n\n"
+        f"Text: {transcript}"
+    )
 
     r = client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=30,
+        max_tokens=500, # 🌟 THE REAL FIX: 30-40 रखने से gpt-oss-20b क्रैश होकर खाली स्ट्रिंग दे रहा था!
         temperature=0.2
     )
     
     raw_output = r.choices[0].message.content or ""
     raw_output = raw_output.strip()
     
-    # फालतू अक्षर हटाकर सिर्फ इंग्लिश वर्ड रखेगा
-    clean_text = re.sub(r'[^a-zA-Z\s]', ' ', raw_output)
-    words = [w for w in clean_text.split() if len(w) > 1]
-    final_keywords = " ".join(words[:4]) 
+    if not raw_output:
+        raise RuntimeError(f"Model '{model_name}' failed to generate keywords. Raw output was completely empty.")
+        
+    # अगर मॉडल ने लंबी बात लिख दी (जैसे "The keywords are: city traffic cars"), तो हम फालतू शब्द हटा देंगे
+    clean_text = re.sub(r'(?i)^(here|are|the|keywords|visual|search|is|:|-|\*|\n|\d+\.)+', ' ', raw_output)
+    clean_text = re.sub(r'[^a-zA-Z\s]', ' ', clean_text)
     
-    if not final_keywords or not any(c.isalpha() for c in final_keywords):
-        raise RuntimeError(f"Model '{model_name}' failed to generate keywords. Raw output was: '{raw_output}'")
+    words = [w for w in clean_text.split() if len(w) > 2] # 2 से बड़े शब्द ही रखेंगे
+    final_keywords = " ".join(words[-3:]) # अगर उसने लंबी लाइन लिखी है, तो आखिरी 3-4 शब्द ही काम के होते हैं
+    
+    if not final_keywords:
+        raise RuntimeError(f"Model '{model_name}' output could not be parsed. Raw output was: '{raw_output}'")
         
     return final_keywords
 
