@@ -52,20 +52,21 @@ def get_exact_duration(path):
 def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
     model = WhisperModel(size, device="cpu", compute_type="int8")
     
+    # 🌟 URDU FIX RESTORED: यह लाइन उर्दू को रोकेगी और सिर्फ हिंदी लिखवाएगी
     segments, _ = model.transcribe(
         path, 
         language="hi", 
         task="transcribe", 
         beam_size=5,
         vad_filter=True,
-        condition_on_previous_text=False
+        condition_on_previous_text=False,
+        initial_prompt="यह देवनागरी लिपि में लिखी गई शुद्ध हिंदी है।" # <- इसे मैंने गलती से हटा दिया था!
     )
     
     seg_list = list(segments)
     chunks = []
     num_chunks = math.ceil(total_audio_duration / target_length)
     
-    # 🌟 NO BULLSHIT FILTER: सीधे असली टेक्स्ट को प्रोसेस करेगा
     last_valid_text = ""
     
     for i in range(num_chunks):
@@ -78,18 +79,15 @@ def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
             
         chunk_text = ""
         for seg in seg_list:
-            # अगर इस 10 सेकंड के हिस्से में कोई आवाज़ है, तो उसे जोड़ लो
             if seg.start < end_time and seg.end > start_time:
                 chunk_text += " " + seg.text.strip()
                 
         chunk_text = chunk_text.strip()
         
-        # अगर 10 सेकंड तक कोई आवाज़ नहीं है, तो कहानी को बनाए रखने के लिए पिछले सीन का टेक्स्ट ले लेगा
         if not chunk_text:
             if last_valid_text:
                 chunk_text = last_valid_text
             else:
-                # अगर ऑडियो की शुरुआत ही खाली है, तो पूरी ऑडियो का जो भी टेक्स्ट है वो ले लेगा
                 full_text = " ".join([s.text.strip() for s in seg_list]).strip()
                 chunk_text = full_text
         else:
@@ -104,7 +102,7 @@ def transcribe_and_chunk(path, size, total_audio_duration, target_length=10.0):
                 
     return chunks
 
-# 🚀 100% NO-BACKUP KEYWORDS (सिर्फ आपका मॉडल, सिर्फ आपकी कमांड)
+# 🚀 100% PURE, NO BACKUP KEYWORD GENERATOR
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
@@ -115,7 +113,6 @@ def get_groq_keywords(transcript):
     client = Groq(api_key=GK[0])
     model_name = "openai/gpt-oss-20b" 
 
-    # एकदम सिंपल प्रॉम्प्ट, बिना किसी कड़े नियम के (ताकि क्रैश न हो)
     prompt = (
         "Give me exactly 3 English visual search keywords for this text. "
         "Only output the keywords, no sentences.\n\n"
@@ -124,7 +121,10 @@ def get_groq_keywords(transcript):
 
     r = client.chat.completions.create(
         model=model_name,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": "You output only English keywords. Never return an empty string."},
+            {"role": "user", "content": prompt}
+        ],
         max_tokens=200, 
         temperature=0.2
     )
@@ -136,7 +136,7 @@ def get_groq_keywords(transcript):
     words = [w for w in clean_text.split() if len(w) > 1]
     final_keywords = " ".join(words[-4:]) 
     
-    # ❌ NO BACKUP: अगर खाली मिला, तो सीधा ऐप को रोकेगा और एरर देगा
+    # ❌ NO BACKUP: सीधा एरर
     if not final_keywords:
         raise RuntimeError(f"Model '{model_name}' gave empty or invalid keywords. Raw output was: '{raw_output}'")
         
