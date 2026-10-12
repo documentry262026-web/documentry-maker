@@ -39,61 +39,106 @@ def run(cmd, timeout=400):
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return res
 
-# 🐛 BUG FIXED: अब यह एग्जैक्ट सेकंड (बिना डेसिमल के) को भी सही से पकड़ेगा
 def get_exact_duration(path):
     exe = ffmpeg()
     result = subprocess.run([exe, "-i", path], capture_output=True, text=True)
-    # Regex Fixed: (\d+(?:\.\d+)?) ensures it catches both '47' and '47.50'
     match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr)
     if match:
         h, m, s = match.groups()
         return float(h) * 3600 + float(m) * 60 + float(s)
     return 10.0
 
-def transcribe_audio(path, size):
+# 🌟 नया फीचर: ऑडियो को 10-10 सेकंड के सीन में तोड़ना
+def transcribe_and_chunk(path, size, target_length=10.0):
     model = WhisperModel(size, device="cpu", compute_type="int8")
     segments, _ = model.transcribe(path, task="transcribe", beam_size=5)
     
     seg_list = list(segments)
-    full_text = " ".join([seg.text.strip() for seg in seg_list])
-    return full_text
+    if not seg_list:
+        raise RuntimeError("No voiceover detected in audio.")
+        
+    chunks = []
+    current_start = 0.0
+    current_text = ""
+    
+    for seg in seg_list:
+        current_text += " " + seg.text.strip()
+        # अगर हिस्सा 10 सेकंड का हो गया, तो उसे एक सीन मान लो
+        if (seg.end - current_start) >= target_length:
+            chunks.append({
+                "text": current_text.strip(),
+                "start": current_start,
+                "end": seg.end,
+                "duration": seg.end - current_start
+            })
+            current_start = seg.end
+            current_text = ""
+            
+    # बचे हुए हिस्से (Remainder) को एडजस्ट करना
+    if current_text.strip():
+        if not chunks:
+            chunks.append({"text": current_text.strip(), "start": 0.0, "end": seg_list[-1].end, "duration": seg_list[-1].end})
+        else:
+            rem_duration = seg_list[-1].end - current_start
+            # अगर बचा हुआ हिस्सा 5 सेकंड से छोटा है, तो उसे आखिरी सीन में ही जोड़ दो
+            if rem_duration < 5.0:
+                chunks[-1]["text"] += " " + current_text.strip()
+                chunks[-1]["end"] = seg_list[-1].end
+                chunks[-1]["duration"] = chunks[-1]["end"] - chunks[-1]["start"]
+            else:
+                chunks.append({
+                    "text": current_text.strip(),
+                    "start": current_start,
+                    "end": seg_list[-1].end,
+                    "duration": rem_duration
+                })
+                
+    return chunks
 
-# 🐛 BUG FIXED: Token limit हटाई गई और सिंपल प्रॉम्प्ट डाला गया
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
-    
-    if not transcript or len(transcript.strip()) < 2:
-        raise RuntimeError("Whisper Error: Transcript is empty. No voiceover detected.")
 
     client = Groq(api_key=GK[0])
     
-    # बिल्कुल सिंपल प्रॉम्प्ट जैसा आपने बताया
-    prompt = (
-        "Read this Hindi text and give me ONLY 2 to 3 English keywords to search for a stock video. "
-        "Do NOT write any sentences, DO NOT say 'here are keywords'. ONLY GIVE THE KEYWORDS.\n\n"
-        f"Text: {transcript}"
-    )
+    prompt = f"""You are a professional stock-footage search keyword generator for a Hindi voiceover-to-video application.
+
+TASK:
+Read the Hindi sentence provided below and identify the single most visually relevant scene that represents what is happening in that sentence.
+
+OUTPUT RULES — STRICT:
+1. Return exactly ONE short English search query containing 2–4 words.
+2. Describe a concrete, filmable visual that could realistically be found on Pixabay.
+3. Prefer specific objects, people, actions, locations, or events mentioned or clearly implied by the sentence.
+4. Translate the meaning into English before selecting the visual.
+5. Do not return Hindi, explanations, introductions, quotation marks, labels, markdown, or punctuation.
+6. Never return an empty response.
+7. Never return the words "none", "unknown", "N/A", "keyword", or "B-roll".
+8. If the sentence is abstract, choose the closest concrete visual metaphor.
+9. If the sentence is unclear, select the most plausible visual supported by its meaning.
+10. Do not use generic fallback terms such as "nature" or "documentary" unless the sentence genuinely describes them.
+
+Now generate the visual search query for this sentence:
+{transcript}
+
+Return ONLY the query."""
 
     r = client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=150,  # FIXED: पहले यह 15 था जिससे मॉडल कट जाता था और खाली जवाब आता था
+        max_tokens=150,
         temperature=0.3
     )
     
     raw_output = r.choices[0].message.content or ""
     raw_output = raw_output.strip()
     
-    # फालतू कैरेक्टर्स साफ करना
     clean_text = re.sub(r"[^\w\s]", " ", raw_output)
     words = [w for w in clean_text.split() if len(w) > 1]
-    
-    # टॉप 3 या 4 कीवर्ड्स उठाना
     final_keywords = " ".join(words[:4]) 
     
     if not final_keywords:
-        raise RuntimeError(f"Groq AI Error: AI failed to output valid keywords. Raw output was: '{raw_output}'")
+        raise RuntimeError(f"Groq AI Error: AI failed to output valid keywords. Raw output: '{raw_output}'")
         
     return final_keywords
 
@@ -130,7 +175,7 @@ def fetch_pixabay_media(query, orientation):
     except Exception:
         pass
 
-    raise RuntimeError(f"Pixabay Error: No video or image found on Pixabay for the strict keywords: '{query}'.")
+    raise RuntimeError(f"No video/image found for: '{query}'")
 
 # ================= UI Components ================= #
 st.header("1. Upload Voiceover")
@@ -143,90 +188,106 @@ whisper_size = st.selectbox("Whisper Model Size", ["tiny", "base", "small"], ind
 st.header("2. Video Settings")
 ratio = st.radio("Output Aspect Ratio", ["9:16 (Shorts/Reels)", "16:9 (Landscape)"], horizontal=True)
 width, height = (720, 1280) if "9:16" in ratio else (1280, 720)
-custom_keyword = st.text_input("Custom Visual Keywords (Optional - Override AI if you want)", "")
 
 st.header("3. Generate Final Video")
-if st.button("Generate Video", disabled=audio_file is None):
+if st.button("Generate Cinematic Video", disabled=audio_file is None):
     with tempfile.TemporaryDirectory() as tmp_dir:
         try:
+            exe = ffmpeg()
             ext = Path(audio_file.name).suffix or ".mp3"
             voice_path = os.path.join(tmp_dir, f"voice{ext}")
             Path(voice_path).write_bytes(audio_file.getvalue())
 
-            duration = get_exact_duration(voice_path)
-            st.write(f"**Exact Audio Duration:** {duration:.2f} seconds")
+            total_audio_duration = get_exact_duration(voice_path)
+            st.write(f"**Total Audio Duration:** {total_audio_duration:.2f} seconds")
 
-            st.info("🎙️ Transcribing voiceover via Whisper...")
-            transcript = transcribe_audio(voice_path, whisper_size)
-
-            st.info(f"🤖 Extracting keywords via Groq (openai/gpt-oss-20b)...")
-            search_query = custom_keyword.strip() if custom_keyword.strip() else get_groq_keywords(transcript)
-            st.write(f"**Final Search Query:** `{search_query}`")
-
-            st.info("🔍 Fetching accurate media from Pixabay...")
-            media_info = fetch_pixabay_media(search_query, "vertical" if width < height else "horizontal")
+            st.info("🎙️ Transcribing and analyzing scenes...")
+            chunks = transcribe_and_chunk(voice_path, whisper_size, target_length=10.0)
             
-            media_file_path = os.path.join(tmp_dir, "media_file" + (".mp4" if media_info["type"] == "video" else ".jpg"))
-            r_media = requests.get(media_info["url"], timeout=60)
-            r_media.raise_for_status()
-            Path(media_file_path).write_bytes(r_media.content)
+            # आखिरी सीन की टाइमिंग को ऑडियो की एक्जैक्ट लंबाई से मैच करना
+            if chunks:
+                chunks[-1]['duration'] = total_audio_duration - chunks[-1]['start']
 
-            st.info("🎬 Rendering final video with motion graphics, fades, and audio sync...")
+            st.success(f"✅ Voiceover split into {len(chunks)} cinematic scenes!")
+
+            scene_files = []
+            
+            # 🎬 हर 10 सेकंड के सीन के लिए अलग वीडियो डाउनलोड और रेंडर करना
+            for i, chunk in enumerate(chunks):
+                st.write(f"---")
+                st.write(f"**Scene {i+1} ({chunk['duration']:.1f}s):** {chunk['text']}")
+                
+                query = get_groq_keywords(chunk['text'])
+                st.write(f"**AI Search Query:** `{query}`")
+                
+                media_info = fetch_pixabay_media(query, "vertical" if width < height else "horizontal")
+                
+                media_file = os.path.join(tmp_dir, f"media_{i}" + (".mp4" if media_info["type"] == "video" else ".jpg"))
+                r_media = requests.get(media_info["url"], timeout=60)
+                r_media.raise_for_status()
+                Path(media_file).write_bytes(r_media.content)
+
+                out_scene = os.path.join(tmp_dir, f"scene_{i}.mp4")
+                dur = chunk['duration']
+                
+                # 🎞️ सिनेमैटिक फेड इफ़ेक्ट (शुरुआत में 0.5s Fade-In, अंत में 0.5s Fade-Out)
+                fade_in = "fade=t=in:st=0:d=0.5"
+                fade_out = f"fade=t=out:st={dur-0.5}:d=0.5"
+
+                if media_info["type"] == "video":
+                    vf = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1,{fade_in},{fade_out}"
+                    cmd = [
+                        exe, "-y", "-stream_loop", "-1", "-i", media_file,
+                        "-t", str(dur), "-vf", vf,
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27",
+                        "-pix_fmt", "yuv420p", "-threads", "2", out_scene
+                    ]
+                else:
+                    vf = f"scale=8000:-1,zoompan=z='min(zoom+0.001,1.25)':d={int(dur*30)}:s={width}x{height}:fps=30,{fade_in},{fade_out}"
+                    cmd = [
+                        exe, "-y", "-loop", "1", "-i", media_file,
+                        "-t", str(dur), "-vf", vf,
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27",
+                        "-pix_fmt", "yuv420p", "-threads", "2", out_scene
+                    ]
+
+                result = run(cmd, timeout=300)
+                if result.returncode != 0:
+                    raise RuntimeError(f"Scene {i+1} render failed:\n{result.stderr[-1000:]}")
+                
+                # सुरक्षित रूप से लिस्ट में जोड़ना (ताकि स्लैश का एरर न आए)
+                scene_files.append(f"file 'scene_{i}.mp4'")
+
+            st.info("🎬 Mixing all scenes with Voiceover...")
+            
+            # Concat File बनाना
+            list_path = os.path.join(tmp_dir, "list.txt")
+            with open(list_path, "w") as f:
+                f.write("\n".join(scene_files))
+
             final_path = os.path.join(tmp_dir, "final_output.mp4")
-            exe = ffmpeg()
-
-            fade_duration = min(1.0, duration / 4)
-            out_fade_start = max(0, duration - fade_duration)
-
-            if media_info["type"] == "video":
-                vf = (
-                    f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-                    f"crop={width}:{height},setsar=1,"
-                    f"fade=t=in:st=0:d={fade_duration},fade=t=out:st={out_fade_start}:d={fade_duration}"
-                )
-                cmd = [
-                    exe, "-y", "-stream_loop", "-1", "-i", media_file_path,
-                    "-i", voice_path,
-                    "-map", "0:v:0", "-map", "1:a:0",
-                    "-t", str(duration),
-                    "-vf", vf,
-                    "-af", f"afade=in:st=0:d={fade_duration},afade=out:st={out_fade_start}:d={fade_duration}",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                    "-threads", "2", "-c:a", "aac", "-b:a", "128k",
-                    "-shortest", "-movflags", "+faststart", final_path
-                ]
-            else:
-                zoom_filter = (
-                    f"scale=8000:-1,"
-                    f"zoompan=z='min(zoom+0.001,1.25)':d={int(duration*30)}:s={width}x{height}:fps=30,"
-                    f"fade=t=in:st=0:d={fade_duration},fade=t=out:st={out_fade_start}:d={fade_duration}"
-                )
-                cmd = [
-                    exe, "-y", "-loop", "1", "-i", media_file_path,
-                    "-i", voice_path,
-                    "-map", "0:v:0", "-map", "1:a:0",
-                    "-t", str(duration),
-                    "-vf", zoom_filter,
-                    "-af", f"afade=in:st=0:d={fade_duration},afade=out:st={out_fade_start}:d={fade_duration}",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                    "-threads", "2", "-c:a", "aac", "-b:a", "128k",
-                    "-shortest", "-movflags", "+faststart", final_path
-                ]
-
-            result = run(cmd, timeout=600)
-            if result.returncode != 0:
-                raise RuntimeError(f"FFmpeg render failed:\n{result.stderr[-2000:]}")
-
-            if not os.path.exists(final_path) or os.path.getsize(final_path) < 1000:
-                raise RuntimeError("Generated video file is empty or missing.")
+            
+            # 🔊 सभी वीडियो को जोड़कर उस पर एक साथ ओरिजिनल वॉइसओवर लगाना
+            concat_cmd = [
+                exe, "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+                "-i", voice_path,
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-c:v", "copy", # Copying video streams = Super Fast!
+                "-c:a", "aac", "-b:a", "128k",
+                "-shortest", "-movflags", "+faststart", final_path
+            ]
+            
+            concat_result = run(concat_cmd, timeout=300)
+            if concat_result.returncode != 0:
+                raise RuntimeError(f"Final mix failed:\n{concat_result.stderr[-1000:]}")
 
             final_bytes = Path(final_path).read_bytes()
-            st.success("✅ Video successfully generated with accurate visuals!")
+            st.success("✅ Cinematic Multi-Clip Video Successfully Generated!")
             st.video(final_bytes)
             st.download_button(
                 "📥 Download Final Video",
                 final_bytes,
-                file_name="ai_voiceover_final.mp4",
+                file_name="ai_cinematic_short.mp4",
                 mime="video/mp4"
             )
 
