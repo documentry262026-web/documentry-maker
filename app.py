@@ -56,7 +56,7 @@ def transcribe_audio(path, size):
     full_text = " ".join([seg.text.strip() for seg in seg_list])
     return full_text
 
-# सुपर स्मार्ट कीवर्ड एक्सट्रैक्टर (3 Retry System के साथ)
+# बिल्कुल सीधा और सेफ कीवर्ड एक्सट्रैक्टर (कोई कोटा वेस्ट नहीं)
 def get_groq_keywords(transcript):
     if not GK:
         raise RuntimeError("GROQ_KEYS missing from Streamlit Secrets")
@@ -65,45 +65,41 @@ def get_groq_keywords(transcript):
         raise RuntimeError("Whisper Error: Transcript is empty. No voiceover detected.")
 
     client = Groq(api_key=GK[0])
-    prompt = (
-        "The following transcript is translated from spoken Hindi/English. Understand the context and provide "
-        "EXACTLY 2 or 3 visual search keywords in English for fetching a relevant stock video. "
-        "Only output the keywords, no extra text, no sentences.\n\n"
-        f"Transcript: {transcript}"
-    )
     
-    last_raw_output = ""
-    
-    # अगर मॉडल खाली जवाब देता है, तो 3 बार ट्राई करेगा
-    for attempt in range(3):
-        try:
-            r = client.chat.completions.create(
-                model="openai/gpt-oss-20b",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=40,
-                temperature=0.2 + (attempt * 0.1) # हर कोशिश में थोड़ा टेंपरेचर बढ़ाएंगे ताकि अलग जवाब दे
-            )
+    # अब सिर्फ 1 कॉल होगी, कोई लूप नहीं। System रोल सेट किया गया है ताकि मॉडल को समझ आए।
+    try:
+        r = client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[
+                {"role": "system", "content": "You are a keyword extractor. You must reply with EXACTLY 3 English words separated by spaces. Never reply with an empty message."},
+                {"role": "user", "content": f"Extract 3 English visual keywords from this text:\n\n{transcript}"}
+            ],
+            max_tokens=30,
+            temperature=0.3
+        )
+        
+        raw_output = r.choices[0].message.content or ""
+        raw_output = raw_output.strip()
+        
+        if not raw_output:
+            raise RuntimeError("Model returned an empty string even with a direct prompt.")
             
-            raw_output = r.choices[0].message.content or ""
-            raw_output = raw_output.strip()
-            last_raw_output = raw_output
+        # मॉडल की फालतू बातें साफ़ करना
+        clean_text = re.sub(r"(?i)^(here|are|the|keywords|visual|search|:|-|\*|\n|\d+\.)+", " ", raw_output)
+        clean_text = re.sub(r"[^\w\s]", " ", clean_text)
+        
+        # 2 अक्षरों से बड़े शब्द छांटना
+        words = [w for w in clean_text.split() if len(w) > 2]
+        final_keywords = " ".join(words[:3]) 
+        
+        if not final_keywords:
+            raise RuntimeError(f"Could not extract clean words from AI output: '{raw_output}'")
             
-            if raw_output:
-                # मॉडल की फालतू बातें साफ़ करना
-                clean_text = re.sub(r"(?i)^(here|are|the|keywords|visual|search|:|-|\*|\n|\d+\.)+", " ", raw_output)
-                clean_text = re.sub(r"[^\w\s]", " ", clean_text)
-                
-                # 2 अक्षरों से बड़े शब्द छांटना
-                words = [w for w in clean_text.split() if len(w) > 2]
-                final_keywords = " ".join(words[:3]) 
-                
-                if final_keywords:
-                    return final_keywords
-        except Exception as e:
-            last_raw_output = str(e)
-            
-    # 3 बार कोशिश करने के बाद भी फेल हो, तभी एरर देगा
-    raise RuntimeError(f"Groq AI Error: Model repeatedly failed to extract keywords after 3 attempts. Last AI response: '{last_raw_output}'")
+        return final_keywords
+        
+    except Exception as e:
+        # अगर कोई भी एरर आती है, तो सीधा ऐप पर दिखाएगा, कोटा वेस्ट नहीं करेगा।
+        raise RuntimeError(f"Groq AI Error: {str(e)}")
 
 def fetch_pixabay_media(query, orientation):
     if not PK:
