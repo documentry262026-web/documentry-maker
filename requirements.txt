@@ -4,4 +4,4 @@ imageio-ffmpeg>=0.5.1
 faster-whisper==1.1.1
 groq>=0.11.0
 av==18.1.0
-google-genai
+google-generativeai
