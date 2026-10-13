@@ -9,7 +9,7 @@ import subprocess
 # --- 1. CONFIGURATION & API KEYS ---
 # यहाँ अपनी पिक्साबे और जेमिनी की एपीआई की (API Key) डालो
 PIXABAY_API_KEY = "57871281-bac58345c5fba7b07f0655556"
-GEMINI_API_KEY = "YAHAN_APNI_GEMINI_KEY_DALO"
+GEMINI_API_KEY = "AQ.Ab8RN6IYjqQiuJ_4mI91fUoebTEzbHfD_YTCoEAqDl_WwUZEgQ"
 
 genai.configure(api_key=GEMINI_API_KEY)
 
