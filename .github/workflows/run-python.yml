@@ -1,4 +1,6 @@
-name: Run Python Script
+- name: Install dependencies
+  run: pip install -r requirements.txt
+  name: Run Python Script
 
 on:
   push:
